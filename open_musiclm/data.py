@@ -237,7 +237,7 @@ def pad_to_longest_fn(data):
 
 def get_dataloader(ds, pad_to_longest = True, **kwargs):
     collate_fn = pad_to_longest_fn if pad_to_longest else curtail_to_shortest_collate
-    return DataLoader(ds, collate_fn = collate_fn, **kwargs)
+    return DataLoader(ds, collate_fn = collate_fn, num_workers=8, **kwargs)
 
 
 @beartype_jit

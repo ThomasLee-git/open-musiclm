@@ -66,7 +66,7 @@ if __name__ == '__main__':
         device=device,
         accelerate_kwargs={
             'log_with': "tensorboard",
-            'logging_dir': './logs/coarse'
+            'project_dir': './logs/coarse'
         },
         config_paths=[args.model_config, args.training_config])
 

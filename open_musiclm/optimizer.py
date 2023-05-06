@@ -38,4 +38,4 @@ def get_linear_scheduler(
     total_iters=10000,
     start_factor=1e-7,
 ):
-    return lr_scheduler.LinearLR(optimizer=optimizer, start_factor=start_factor, end_factor=1., total_iters=total_iters)
+    return lr_scheduler.LinearLR(optimizer=optimizer, start_factor=start_factor, end_factor=1., total_iters=total_iters, verbose=True)

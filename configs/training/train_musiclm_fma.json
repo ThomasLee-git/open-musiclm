@@ -24,8 +24,8 @@
         "max_grad_norm": 0.5,
         "cross_entropy_loss_weights": [0.0, 1.0],
         "num_train_steps": 200001,
-        "save_results_every": 250,
-        "save_model_every": 1000,
+        "save_results_every": 100,
+        "save_model_every": 100,
         "save_predicted_tokens": true,
         "save_reconstructed_wave": true,
         "use_preprocessed_data": false
@@ -42,8 +42,8 @@
         "max_grad_norm": 0.5,
         "cross_entropy_loss_weights": [0.0, 0.0, 1.0],
         "num_train_steps": 200001,
-        "save_results_every": 250,
-        "save_model_every": 1000,
+        "save_results_every": 100,
+        "save_model_every": 100,
         "save_predicted_tokens": true,
         "save_reconstructed_wave": true,
         "use_preprocessed_data": false
@@ -60,8 +60,8 @@
         "max_grad_norm": 0.5,
         "cross_entropy_loss_weights": [0.0, 0.0, 1.0],
         "num_train_steps": 200001,
-        "save_results_every": 250,
-        "save_model_every": 1000,
+        "save_results_every": 100,
+        "save_model_every": 100,
         "save_predicted_tokens": true,
         "save_reconstructed_wave": true,
         "use_preprocessed_data": false

@@ -35,10 +35,10 @@ if __name__ == '__main__':
         training_config=training_config,
         clap=clap,
         results_folder=args.results_folder,
-        device=device,
+        device=None,
         accelerate_kwargs={
             'log_with': "tensorboard",
-            'logging_dir': './logs/clap_rvq'
+            'project_dir': './logs/clap_rvq'
         },
         config_paths=[args.model_config, args.training_config])
 

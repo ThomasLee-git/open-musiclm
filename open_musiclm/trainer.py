@@ -4,6 +4,11 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from shutil import rmtree
+import os
+
+# ThomasLee
+import datetime
+import accelerate
 
 import numpy as np
 import torch
@@ -318,10 +323,10 @@ class SingleStageTrainer(nn.Module):
 
         self.results_folder = Path(results_folder)
 
-        if self.is_main and len([*self.results_folder.glob('**/*')]) > 0 and yes_or_no('do you want to clear previous experiment checkpoints and results?'):
-            rmtree(str(self.results_folder))
+        # if self.is_main and len([*self.results_folder.glob('**/*')]) > 0 and yes_or_no('do you want to clear previous experiment checkpoints and results?'):
+        #     rmtree(str(self.results_folder))
 
-            self.results_folder.mkdir(parents=True, exist_ok=True)
+        #     self.results_folder.mkdir(parents=True, exist_ok=True)
 
         self.accelerator.wait_for_everyone()
 
@@ -438,7 +443,7 @@ class SingleStageTrainer(nn.Module):
 
                 self.accelerator.backward(loss / self.grad_accum_every)
 
-                accum_log(logs, {'loss': loss.item() / self.grad_accum_every})
+                logs = accum_log(logs, {'loss': loss.item() / self.grad_accum_every})
 
         if exists(self.max_grad_norm):
             self.accelerator.clip_grad_norm_(self.transformer.parameters(), self.max_grad_norm)
@@ -448,7 +453,7 @@ class SingleStageTrainer(nn.Module):
         if exists(self.scheduler):
             self.scheduler.step()
 
-        self.print(f"{steps}: loss: {logs['loss']}")
+        self.print(f"{datetime.datetime.now()} {steps}: loss: {logs['loss']}")
 
         # sample results every so often
 
@@ -476,7 +481,7 @@ class SingleStageTrainer(nn.Module):
                 gt_tokens = gt_tokens.detach().cpu().long()
 
                 valid_accuracy = (pred_tokens == gt_tokens).float().mean().item()
-                self.print(f'{steps}: valid loss {valid_loss}, valid acc {valid_accuracy}')
+                self.print(f'{datetime.datetime.now()} {steps}: valid loss {valid_loss}, valid acc {valid_accuracy}')
 
                 if self.is_main and self.save_predicted_tokens:
                     # interleave pred_tokens and gt_tokens and save to a text file
@@ -535,7 +540,7 @@ class SingleStageTrainer(nn.Module):
 
         if self.is_main and not (steps % self.save_model_every):
 
-            self.print(f'{steps}: saving model to {str(self.results_folder)}')
+            self.print(f'{datetime.datetime.now()} {steps}: saving model to {str(self.results_folder)}')
 
             model_path = str(self.results_folder / f'{self.stage}.transformer.{steps}.pt')
             optim_path = str(self.results_folder / f'{self.stage}.optimizer.{steps}.pt')
@@ -557,7 +562,7 @@ class SingleStageTrainer(nn.Module):
             logs = self.train_step()
             log_fn(logs)
 
-        self.print('training complete')
+        self.print(f'{datetime.datetime.now()}training complete')
 
 
 @beartype_jit
@@ -597,7 +602,7 @@ class ClapRVQTrainer(nn.Module):
         self.ds = dataset
         self.num_train_steps = num_train_steps
         self.accumulate_batches = accumulate_batches
-        self.register_buffer('steps', torch.Tensor([0]))
+        self.register_buffer('steps', torch.tensor(0))
 
         if not exists(self.ds):
             assert exists(
@@ -638,21 +643,23 @@ class ClapRVQTrainer(nn.Module):
             self.dl,
             self.valid_dl
         )
+        print(f"dataloader len {len(self.dl)}")
 
         # dataloader iterators
 
-        self.dl_iter = cycle(self.dl)
-        self.valid_dl_iter = cycle(self.valid_dl)
+        self.dl_iter = iter(self.dl)
+        self.valid_dl_iter = iter(self.valid_dl)
 
         self.save_model_every = save_model_every
         self.save_results_every = save_results_every
 
         self.results_folder = Path(results_folder)
 
-        if len([*self.results_folder.glob('**/*')]) > 0 and yes_or_no('do you want to clear previous experiment checkpoints and results?'):
-            rmtree(str(self.results_folder))
+        # if len([*self.results_folder.glob('**/*')]) > 0 and yes_or_no('do you want to clear previous experiment checkpoints and results?'):
+        #     rmtree(str(self.results_folder))
 
-        self.results_folder.mkdir(parents=True, exist_ok=True)
+        # self.results_folder.mkdir(parents=True, exist_ok=True)
+        self.accelerator.wait_for_everyone()
 
         hps = {"num_train_steps": num_train_steps, "batch_size": batch_size, "accumulate_batches": accumulate_batches}
 
@@ -666,6 +673,11 @@ class ClapRVQTrainer(nn.Module):
             configs_folder.mkdir(parents=True, exist_ok=True)
             for config_path in config_paths:
                 copy_file_to_folder(config_path, configs_folder)
+
+        # ThomasLee
+        self.rank = self.accelerator.process_index
+        self.local_rank = self.accelerator.local_process_index
+        self.to(self.accelerator.device)
 
     def print(self, msg):
         self.accelerator.print(msg)
@@ -695,30 +707,38 @@ class ClapRVQTrainer(nn.Module):
         iters = math.ceil(iters / self.accelerator.num_processes)
 
         embeds = []
-        for _ in tqdm(range(iters), desc='accumulating batches'):
-            raw_wave_for_clap = next(self.dl_iter)[0]
+        for _ in tqdm(range(iters), desc=f'rank={self.rank} local_rank={self.local_rank} {steps=} accumulating batches'):
+            # ThomasLee   
+            try:
+                raw_wave_for_clap = next(self.dl_iter)[0]
+            except:
+                self.dl_iter = iter(self.dl)
+                raw_wave_for_clap = next(self.dl_iter)[0]
             embed = self.audio_conditioner.forward(audio_input=raw_wave_for_clap.to(self.device), return_embedding=True)
+            # print(f"{rank=} {local_rank=} wav={raw_wave_for_clap.size()} emb={embed.size()}")
             embeds.append(embed)
 
         embeds = torch.cat(embeds, dim=0)
         embeds = self.accelerator.gather_for_metrics(embeds)
-
-        if self.is_main:
-            loss = self.audio_conditioner.quantize(embeds, return_rvq_loss=True)
-
-            self.print(f'loss: {loss}')
-
-            # sample results every so often
-            valid_loss = None
-            if not (steps % self.save_results_every):
+        # print(f"rank={self.rank} local_rank={self.local_rank} embeds={embeds.size()}")
+        loss = self.audio_conditioner.quantize(embeds, return_rvq_loss=True)
+        self.print(f'{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} {steps=} training loss: {loss}')
+        valid_loss = None
+        if not (steps % self.save_results_every):
+            # ThomasLee   
+            try:
+                raw_wave_for_clap = next(self.valid_dl_iter)[0]
+            except:
+                self.valid_dl_iter = iter(self.dl)
                 raw_wave_for_clap = next(self.valid_dl_iter)[0]
 
-                with torch.no_grad():
-                    self.audio_conditioner.learn_rvq = False
-                    valid_loss = self.audio_conditioner.forward(audio_input=raw_wave_for_clap.to(self.device), return_rvq_loss=True)
+            with torch.no_grad():
+                self.audio_conditioner.learn_rvq = False
+                valid_loss = self.audio_conditioner.forward(audio_input=raw_wave_for_clap.to(self.device), return_rvq_loss=True)
 
-                self.print(f'{steps}: valid loss {valid_loss}')
+            self.print(f'{datetime.datetime.now()}: {steps=} valid loss {valid_loss}')
 
+        if self.is_main:
             self.accelerator.log({
                 "train_loss": loss,
                 "valid_loss": valid_loss
@@ -730,10 +750,14 @@ class ClapRVQTrainer(nn.Module):
                 # save audio conditioner (clap) rvq checkpoint
                 rvq_state_dict = self.accelerator.unwrap_model(self.audio_conditioner).rq.state_dict()
                 torch.save(rvq_state_dict, str(self.results_folder / f'clap.rvq.{steps}.pt'))
-
-                self.print(f'{steps}: saving model to {str(self.results_folder)}')
-
-        self.steps += 1
+                self.print(f'{datetime.datetime.now()}: {steps=} saving model to {str(self.results_folder)}')
+            # update
+            self.steps += 1
+        accelerate.utils.broadcast(self.steps)
+        # print(f"rank={self.rank} local_rank={self.local_rank} steps_t={steps_t.item()}")
+        print(f"rank={self.rank} local_rank={self.local_rank} update steps={self.steps.item()}")
+        self.accelerator.wait_for_everyone()
+        
 
     def train(self, log_fn=noop):
 
@@ -808,10 +832,12 @@ class HfHubertKmeansTrainer(nn.Module):
 
         self.results_folder = Path(results_folder)
 
-        if len([*self.results_folder.glob('**/*')]) > 0 and yes_or_no('do you want to clear previous experiment checkpoints and results?'):
-            rmtree(str(self.results_folder))
+        # if len([*self.results_folder.glob('**/*')]) > 0 and yes_or_no('do you want to clear previous experiment checkpoints and results?'):
+        #     rmtree(str(self.results_folder))
 
-        self.results_folder.mkdir(parents=True, exist_ok=True)
+        # self.results_folder.mkdir(parents=True, exist_ok=True)
+
+        self.accelerator.wait_for_everyone()
 
         if self.is_main and exists(config_paths):
             configs_folder = self.results_folder / "configs"

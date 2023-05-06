@@ -319,7 +319,7 @@ def create_clap_rvq_trainer_from_config(
         config_paths=config_paths,
         **asdict(training_config.clap_rvq_trainer_cfg),
         **kwargs,
-    ).to(device)
+    )
 
     return trainer
 
