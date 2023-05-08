@@ -139,6 +139,7 @@ class SingleStageTrainer(nn.Module):
         cross_entropy_loss_weights: Optional[List[float]]=None,
         ignore_load_errors=True,
         folder=None,
+        blacklist_path:str=None,
         use_preprocessed_data=False,
         lr=3e-4,
         lr_warmup=0,
@@ -222,7 +223,7 @@ class SingleStageTrainer(nn.Module):
         else:
             raise ValueError(f'invalid stage: {stage}')
 
-        self.register_buffer('steps', torch.Tensor([0]))
+        self.register_buffer('steps', torch.tensor(0))
 
         self.num_train_steps = num_train_steps
         self.batch_size = batch_size
@@ -264,11 +265,12 @@ class SingleStageTrainer(nn.Module):
 
                 self.ds = SoundDataset(
                     folder,
+                    blacklist_path=blacklist_path,
                     max_length_seconds=data_max_length_seconds,
                     normalize=normalize,
                     target_sample_hz=target_sample_hz,
                     seq_len_multiple_of=seq_len_multiple_of,
-                    ignore_files=default(ignore_files, []),
+                    ignore_files=default(ignore_files, None),
                     ignore_load_errors=ignore_load_errors
                 )
 
@@ -295,26 +297,40 @@ class SingleStageTrainer(nn.Module):
             self.valid_dl = get_dataloader(self.valid_ds, batch_size=batch_size, shuffle=True)
 
         # prepare with accelerator
-
-        (
-            self.train_wrapper,
-            self.optim,
-            self.dl,
-            self.valid_dl
-        ) = self.accelerator.prepare(
-            self.train_wrapper,
-            self.optim,
-            self.dl,
-            self.valid_dl
-        )
-
+        # ThomasLee: according to accelerate documentation, optimizer SHOULD NOT be passed if scheduler is present
         if exists(self.scheduler):
-            self.scheduler = self.accelerator.prepare(self.scheduler)
+            (
+                self.train_wrapper,
+                self.optim,
+                self.scheduler,
+                self.dl,
+                self.valid_dl
+            ) = self.accelerator.prepare(
+                self.train_wrapper,
+                self.optim,
+                self.scheduler,
+                self.dl,
+                self.valid_dl
+            )
+        else:
+            (
+                self.train_wrapper,
+                self.optim,
+                self.dl,
+                self.valid_dl
+            ) = self.accelerator.prepare(
+                self.train_wrapper,
+                self.optim,
+                self.dl,
+                self.valid_dl
+            )
+        # if exists(self.scheduler):
+        #     self.scheduler = self.accelerator.prepare(self.scheduler)
 
         # dataloader iterators
 
-        self.dl_iter = cycle(self.dl)
-        self.valid_dl_iter = cycle(self.valid_dl)
+        # self.dl_iter = iter(self.dl)
+        # self.valid_dl_iter = iter(self.valid_dl)
 
         self.save_model_every = save_model_every
         self.save_results_every = save_results_every
@@ -360,6 +376,12 @@ class SingleStageTrainer(nn.Module):
             configs_folder.mkdir(parents=True, exist_ok=True)
             for config_path in config_paths:
                 copy_file_to_folder(config_path, configs_folder)
+
+        # ThomasLee
+        self.rank = self.accelerator.process_index
+        self.local_rank = self.accelerator.local_process_index
+        self.to(self.accelerator.device)
+        print(f"dataloader len {len(self.dl)}")
 
     def save(self, model_path, optim_path, scheduler_path=None):
         model_state_dict = self.accelerator.get_state_dict(self.transformer)
@@ -418,71 +440,59 @@ class SingleStageTrainer(nn.Module):
         return self.accelerator.is_local_main_process
 
     def train_step(self):
-        device = self.device
-
-        steps = int(self.steps.item())
-
-        self.transformer.train()
-
-        # logs
-
-        logs = {}
-
-        # update vae (generator)
-
-        for _ in range(self.grad_accum_every):
-            data_kwargs = dict(zip(self.ds_fields, next(self.dl_iter)))
-            non_empty_batch = False
-            while non_empty_batch is False:
-                if len(data_kwargs) == 0:
-                    continue
-
-                non_empty_batch = True
-
+        # train
+        acc_train_loss = 0.
+        for batch_idx, batch in enumerate(self.dl, start=1):
+            train_loss = None
+            grad_norms = None
+            valid_loss = None
+            valid_accuracy = None
+            self.transformer.train()
+            steps = int(self.steps.item())
+            with self.accelerator.accumulate(self.train_wrapper):
+                batch_data, batch_names = batch[:-1], batch[-1]
+                print(f"rank={self.rank} local_rank={self.local_rank} training {batch_names=}")
+                data_kwargs = dict(zip(self.ds_fields, batch_data))
                 loss, _, _ = self.train_wrapper(**data_kwargs, return_loss=True)
+                acc_train_loss += loss.item()
+                # update
+                self.accelerator.backward(loss)
+                if self.accelerator.sync_gradients:
+                    if exists(self.max_grad_norm):
+                        grad_norms = self.accelerator.clip_grad_norm_(self.transformer.parameters(), self.max_grad_norm).item()
+                    acc_train_loss_t = torch.tensor(acc_train_loss).to(self.accelerator.device)
+                    self.accelerator.gather(acc_train_loss_t)
+                    acc_train_loss_t /= self.accelerator.gradient_accumulation_steps
+                    acc_train_loss = acc_train_loss_t.item()
+                    print(f"rank={self.rank} local_rank={self.local_rank} {acc_train_loss=}")
+                    self.print(f"{datetime.datetime.now()}: {steps=} {batch_idx=} {acc_train_loss=} {grad_norms=}")
+                    train_loss = acc_train_loss
+                    acc_train_loss = 0.
+                self.optim.step()
+                if exists(self.scheduler):
+                    self.scheduler.step()
+                self.optim.zero_grad()
 
-                self.accelerator.backward(loss / self.grad_accum_every)
-
-                logs = accum_log(logs, {'loss': loss.item() / self.grad_accum_every})
-
-        if exists(self.max_grad_norm):
-            self.accelerator.clip_grad_norm_(self.transformer.parameters(), self.max_grad_norm)
-
-        self.optim.step()
-        self.optim.zero_grad()
-        if exists(self.scheduler):
-            self.scheduler.step()
-
-        self.print(f"{datetime.datetime.now()} {steps}: loss: {logs['loss']}")
-
-        # sample results every so often
-
-        valid_loss = None
-        valid_accuracy = None
-        if not (steps % self.save_results_every):
-            non_empty_batch = False
-            while non_empty_batch is False:
-                data_kwargs = dict(zip(self.ds_fields, next(self.valid_dl_iter)))
-                if len(data_kwargs) == 0:
-                    continue
-
-                non_empty_batch = True
-
+            # sample results every so often
+            if not (steps % self.save_results_every):
+            # if steps % self.save_results_every:
+                self.transformer.eval()
+                data_kwargs = None
+                for batch in self.valid_dl:
+                    batch_data, batch_names = batch[:-1], batch[-1]
+                    print(f"rank={self.rank} local_rank={self.local_rank} validation {batch_names=}")
+                    data_kwargs = dict(zip(self.ds_fields, batch_data))
+                    break
                 with torch.no_grad():
-                    self.train_wrapper.eval()
                     valid_loss, all_logits, all_labels = self.accelerator.unwrap_model(self.train_wrapper)(**data_kwargs, return_loss=True)
-
-                valid_loss = self.accelerator.reduce(valid_loss, 'mean').item()
-
-                pred_tokens = self.accelerator.gather_for_metrics(all_logits[-1].argmax(1).contiguous())
-                gt_tokens = self.accelerator.gather_for_metrics(all_labels[-1].contiguous())
-
-                pred_tokens = pred_tokens.detach().cpu().long()
-                gt_tokens = gt_tokens.detach().cpu().long()
-
-                valid_accuracy = (pred_tokens == gt_tokens).float().mean().item()
-                self.print(f'{datetime.datetime.now()} {steps}: valid loss {valid_loss}, valid acc {valid_accuracy}')
-
+                    # reduce
+                    pred_tokens = self.accelerator.gather_for_metrics(all_logits[-1].argmax(1).contiguous())
+                    gt_tokens = self.accelerator.gather_for_metrics(all_labels[-1].contiguous())
+                    pred_tokens = pred_tokens.detach().cpu().long()
+                    gt_tokens = gt_tokens.detach().cpu().long()
+                    valid_accuracy = (pred_tokens == gt_tokens).float().mean().item()
+                    valid_loss = self.accelerator.reduce(valid_loss, 'mean').item()
+                    self.print(f'{datetime.datetime.now()}: {steps=} {valid_loss=} {valid_accuracy=}')
                 if self.is_main and self.save_predicted_tokens:
                     # interleave pred_tokens and gt_tokens and save to a text file
 
@@ -529,32 +539,32 @@ class SingleStageTrainer(nn.Module):
                     if 'wandb' in self.log_with and exists(wandb):
                         audios = [wandb.Audio(file_path, caption=f'reconstructed wave at {steps} steps') for file_path in file_paths]
                         wandb.log({'reconstructed_wave': audios})
+            # log
+            self.accelerator.log({
+                "train_loss": train_loss,
+                "grad_norms": grad_norms,
+                "valid_loss": valid_loss,
+                "valid_accuracy": valid_accuracy
+            }, step=steps)
 
-        self.accelerator.log({
-            "train_loss": logs['loss'],
-            "valid_loss": valid_loss,
-            "valid_accuracy": valid_accuracy
-        }, step=steps)
-
-        # save model every so often
-
-        if self.is_main and not (steps % self.save_model_every):
-
-            self.print(f'{datetime.datetime.now()} {steps}: saving model to {str(self.results_folder)}')
-
-            model_path = str(self.results_folder / f'{self.stage}.transformer.{steps}.pt')
-            optim_path = str(self.results_folder / f'{self.stage}.optimizer.{steps}.pt')
-            scheduler_path = str(self.results_folder / f'{self.stage}.scheduler.{steps}.pt')
-
-            self.save(model_path, optim_path, scheduler_path)
-
-            # save audio conditioner (clap) rvq checkpoint
-            if exists(self.audio_conditioner) and self.audio_conditioner.learn_rvq:
-                rvq_state_dict = self.audio_conditioner.rq.state_dict()
-                torch.save(rvq_state_dict, str(self.results_folder / f'{self.stage}.conditioner_rvq.{steps}.pt'))
-
-        self.steps += 1
-        return logs
+            # save model every so often
+            if self.is_main and not (steps % self.save_model_every):
+                model_path = str(self.results_folder / f'{self.stage}.transformer.{steps}.pt')
+                optim_path = str(self.results_folder / f'{self.stage}.optimizer.{steps}.pt')
+                scheduler_path = str(self.results_folder / f'{self.stage}.scheduler.{steps}.pt')
+                self.save(model_path, optim_path, scheduler_path)
+                # save audio conditioner (clap) rvq checkpoint
+                if exists(self.audio_conditioner) and self.audio_conditioner.learn_rvq:
+                    rvq_state_dict = self.audio_conditioner.rq.state_dict()
+                    torch.save(rvq_state_dict, str(self.results_folder / f'{self.stage}.conditioner_rvq.{steps}.pt'))
+                self.print(f'{datetime.datetime.now()}: {steps=} done saving model to {str(self.results_folder)}')
+            # update steps
+            if self.is_main:
+                self.steps += 1
+            accelerate.utils.broadcast(self.steps)
+            # print(f"rank={self.rank} local_rank={self.local_rank} update steps={self.steps.item()}")
+            self.accelerator.wait_for_everyone()
+        return None
 
     def train(self, log_fn=noop):
 
@@ -562,7 +572,7 @@ class SingleStageTrainer(nn.Module):
             logs = self.train_step()
             log_fn(logs)
 
-        self.print(f'{datetime.datetime.now()}training complete')
+        self.print(f'{datetime.datetime.now()} training complete')
 
 
 @beartype_jit
@@ -729,7 +739,7 @@ class ClapRVQTrainer(nn.Module):
             try:
                 raw_wave_for_clap = next(self.valid_dl_iter)[0]
             except:
-                self.valid_dl_iter = iter(self.dl)
+                self.valid_dl_iter = iter(self.valid_dl)
                 raw_wave_for_clap = next(self.valid_dl_iter)[0]
 
             with torch.no_grad():

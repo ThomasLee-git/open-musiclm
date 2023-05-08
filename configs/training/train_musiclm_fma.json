@@ -1,10 +1,10 @@
 {
     "clap_rvq_trainer_cfg": {
         "folder": "./data/fma_large",
-        "num_train_steps": 1000,
+        "num_train_steps": 10000,
         "batch_size": 64,
         "accumulate_batches": 32,
-        "save_model_every": 10,
+        "save_model_every": 20,
         "save_results_every": 5
     },
     "hubert_kmeans_trainer_cfg": {
@@ -15,10 +15,11 @@
     "semantic_trainer_cfg": {
         "stage": "semantic",
         "folder": "./data/fma_large",
+        "blacklist_path": "./fma_large_blacklist.txt",
         "valid_frac": 0.05,
         "lr": 0.0003,
         "lr_warmup": 3000,
-        "batch_size": 4,
+        "batch_size": 32,
         "grad_accum_every": 8,
         "wd": 0.01,
         "max_grad_norm": 0.5,
@@ -33,10 +34,11 @@
     "coarse_trainer_cfg": {
         "stage": "coarse",
         "folder": "./data/fma_large",
+        "blacklist_path": "./fma_large_blacklist.txt",
         "valid_frac": 0.05,
         "lr": 0.0003,
         "lr_warmup": 6000,
-        "batch_size": 2,
+        "batch_size": 16,
         "grad_accum_every": 8,
         "wd": 0.01,
         "max_grad_norm": 0.5,
@@ -51,10 +53,11 @@
     "fine_trainer_cfg": {
         "stage": "fine",
         "folder": "./data/fma_large",
+        "blacklist_path": "./fma_large_blacklist.txt",
         "valid_frac": 0.05,
         "lr": 0.0003,
         "lr_warmup": 0,
-        "batch_size": 2,
+        "batch_size": 16,
         "grad_accum_every": 8,
         "wd": 0.01,
         "max_grad_norm": 0.5,

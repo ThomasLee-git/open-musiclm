@@ -66,6 +66,7 @@ class SoundDataset(Dataset):
     def __init__(
         self,
         folder,
+        blacklist_path: str = None,
         exts = ['flac', 'wav', 'mp3'],
         max_length_seconds: Optional[Union[FloatOrInt, Tuple[Optional[FloatOrInt], ...]]] = 1,
         normalize: Union[bool, Tuple[bool, ...]] = False,
@@ -75,12 +76,20 @@ class SoundDataset(Dataset):
         ignore_load_errors=True,
         random_crop=True,
     ):
+        # ThomasLee
+        def get_file_name_list(path:str)->list:
+            with open(path, mode="r") as rf:
+                name_list = rf.read().splitlines()
+            return name_list
+
         super().__init__()
         path = Path(folder)
         assert path.exists(), 'folder does not exist'
 
         files = []
-        ignore_files = default(ignore_files, [])
+        ignore_files = default(ignore_files, None)
+        if ignore_files is None and blacklist_path:
+            ignore_files = get_file_name_list(blacklist_path)
         num_ignored = 0
         ignore_file_set = set([f.split('/')[-1] for f in ignore_files])
         for ext in exts:
@@ -124,7 +133,8 @@ class SoundDataset(Dataset):
             else:
                 raise Exception(f'error loading file {file}')
 
-        return self.process_audio(data, sample_hz, pad_to_target_length=True)
+        audio_data = self.process_audio(data, sample_hz, pad_to_target_length=True)
+        return tuple(audio_data + [file.stem])
 
     def process_audio(self, data, sample_hz, pad_to_target_length=True):
 
@@ -188,12 +198,12 @@ class SoundDataset(Dataset):
 
         # cast from list to tuple
 
-        output = tuple(output)
+        # output = tuple(output)
 
         # return only one audio, if only one target resample freq
 
-        if num_outputs == 1:
-            return output[0]
+        # if num_outputs == 1:
+        #     return output[0]
 
         return output
 

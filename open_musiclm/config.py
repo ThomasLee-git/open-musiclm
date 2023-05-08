@@ -126,6 +126,7 @@ class HubertKmeansTrainerConfig:
 class SingleStageTrainerConfig:
     stage: str
     folder: str
+    blacklist_path: str
     valid_frac: float
     lr: float
     lr_warmup: int
@@ -387,7 +388,7 @@ def create_single_stage_trainer_from_config(
         config_paths=config_paths,
         **asdict(trainer_cfg),
         **kwargs,
-    ).to(device)
+    )
 
     return trainer
 

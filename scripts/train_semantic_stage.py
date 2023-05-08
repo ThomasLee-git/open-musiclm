@@ -60,10 +60,12 @@ if __name__ == '__main__':
         clap=clap,
         wav2vec=wav2vec,
         encodec_wrapper=None,
-        device=device,
+        device=None,
         accelerate_kwargs={
             'log_with': "tensorboard",
-            'project_dir': './logs/semantic'
+            'project_dir': './logs/test/semantic_stage',
+            "split_batches": True,
+            "gradient_accumulation_steps": training_config.semantic_trainer_cfg.grad_accum_every
         },
         config_paths=[args.model_config, args.training_config])
 

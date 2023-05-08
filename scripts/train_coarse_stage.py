@@ -63,10 +63,11 @@ if __name__ == '__main__':
         clap=clap,
         wav2vec=wav2vec,
         encodec_wrapper=encodec_wrapper,
-        device=device,
+        device=None,
         accelerate_kwargs={
             'log_with': "tensorboard",
-            'project_dir': './logs/coarse'
+            'project_dir': './logs/coarse_stage',
+            "split_batches": True
         },
         config_paths=[args.model_config, args.training_config])
 
