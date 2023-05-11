@@ -18,6 +18,7 @@ from scripts.train_utils import validate_train_args, load_checkpoint_from_args
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='train semantic stage')
     parser.add_argument('--results_folder', default='./results/semantic')
+    parser.add_argument('--project_dir', default=None, type=str)
     parser.add_argument('--continue_from_dir', default=None, type=str)
     parser.add_argument('--continue_from_step', default=None, type=int)
     parser.add_argument('--model_config', default='./configs/model/musiclm_small.json')
@@ -63,7 +64,7 @@ if __name__ == '__main__':
         device=None,
         accelerate_kwargs={
             'log_with': "tensorboard",
-            'project_dir': './logs/test/semantic_stage',
+            'project_dir': args.project_dir,
             "split_batches": True,
             "gradient_accumulation_steps": training_config.semantic_trainer_cfg.grad_accum_every
         },

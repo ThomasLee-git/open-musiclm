@@ -18,6 +18,7 @@ from scripts.train_utils import load_checkpoint_from_args, validate_train_args
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='train coarse stage')
     parser.add_argument('--results_folder', default='./results/coarse')
+    parser.add_argument('--project_dir', default=None, type=str)
     parser.add_argument('--continue_from_dir', default=None, type=str)
     parser.add_argument('--continue_from_step', default=None, type=int)
     parser.add_argument('--model_config', default='./configs/model/musiclm_small.json')
@@ -66,7 +67,7 @@ if __name__ == '__main__':
         device=None,
         accelerate_kwargs={
             'log_with': "tensorboard",
-            'project_dir': './logs/coarse_stage',
+            'project_dir': args.project_dir,
             "split_batches": True
         },
         config_paths=[args.model_config, args.training_config])

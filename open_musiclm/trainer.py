@@ -451,7 +451,7 @@ class SingleStageTrainer(nn.Module):
             steps = int(self.steps.item())
             with self.accelerator.accumulate(self.train_wrapper):
                 batch_data, batch_names = batch[:-1], batch[-1]
-                print(f"rank={self.rank} local_rank={self.local_rank} training {batch_names=}")
+                print(f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {batch_names=}")
                 data_kwargs = dict(zip(self.ds_fields, batch_data))
                 loss, _, _ = self.train_wrapper(**data_kwargs, return_loss=True)
                 acc_train_loss += loss.item()
@@ -464,7 +464,7 @@ class SingleStageTrainer(nn.Module):
                     self.accelerator.gather(acc_train_loss_t)
                     acc_train_loss_t /= self.accelerator.gradient_accumulation_steps
                     acc_train_loss = acc_train_loss_t.item()
-                    print(f"rank={self.rank} local_rank={self.local_rank} {acc_train_loss=}")
+                    print(f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {acc_train_loss=}")
                     self.print(f"{datetime.datetime.now()}: {steps=} {batch_idx=} {acc_train_loss=} {grad_norms=}")
                     train_loss = acc_train_loss
                     acc_train_loss = 0.

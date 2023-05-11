@@ -248,7 +248,7 @@ def create_semantic_transformer_from_config(
         semantic_codebook_size=model_config.hubert_kmeans_cfg.codebook_size,
         num_clap_quantizers=model_config.clap_rvq_cfg.rq_num_quantizers,
         **kwargs,
-    ).to(device)
+    )
 
     if exists(checkpoint_path):
         load_model(transformer, checkpoint_path)
@@ -270,7 +270,7 @@ def create_coarse_transformer_from_config(
         num_clap_quantizers=model_config.clap_rvq_cfg.rq_num_quantizers,
         num_coarse_quantizers=model_config.global_cfg.num_coarse_quantizers,
         **kwargs,
-    ).to(device)
+    )
 
     if exists(checkpoint_path):
         load_model(transformer, checkpoint_path)
@@ -292,7 +292,7 @@ def create_fine_transformer_from_config(
         num_coarse_quantizers=model_config.global_cfg.num_coarse_quantizers,
         num_fine_quantizers=model_config.global_cfg.num_fine_quantizers,
         **kwargs,
-    ).to(device)
+    )
 
     if exists(checkpoint_path):
         load_model(transformer, checkpoint_path)
