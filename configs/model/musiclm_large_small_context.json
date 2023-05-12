@@ -29,6 +29,7 @@
         "output_hz": 75
     },
     "semantic_cfg": {
+        "use_subln": true,
         "dim": 1024,
         "depth": 24,
         "heads": 16,
@@ -39,6 +40,7 @@
         "relative_position_bias_type": "continuous"
     },
     "coarse_cfg": {
+        "use_subln": true,
         "dim": 1024,
         "depth": 24,
         "heads": 16,
@@ -49,6 +51,7 @@
         "relative_position_bias_type": "continuous"
     },
     "fine_cfg": {
+        "use_subln": true,
         "dim": 1024,
         "depth": 24,
         "heads": 16,

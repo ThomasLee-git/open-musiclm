@@ -410,3 +410,56 @@ class Transformer(nn.Module):
             x = ff(x) + x
 
         return self.norm(x)
+
+
+class TorchScaleDecoderWrapper(nn.Module):
+    def __init__(
+        self,
+        dim,
+        depth,
+        heads,
+        dim_context=None,
+        cross_attend=False,
+        attn_dropout=0.0,
+        ff_dropout=0.0,
+        grad_shrink_alpha=0.1,
+        cond_as_self_attn_prefix=False,
+        non_causal_prefix_size=0,
+        relative_position_bias_type="continuous",
+        **kwargs,
+    ) -> None:
+        from torchscale.architecture.config import DecoderConfig
+        from torchscale.architecture.decoder import Decoder
+
+        super().__init__()
+        print(f"using subln")
+
+        config_dict = {
+            "decoder_embed_dim": dim,
+            "decoder_attention_heads": heads,
+            "decoder_ffn_embed_dim": dim * 4,
+            "decoder_layers": depth,
+            "decoder_normalize_before": True,
+            "activation_fn": "gelu",
+            "dropout": attn_dropout,
+            "drop_path_rate": 0.0,
+            "attention_dropout": attn_dropout,
+            "activation_dropout": 0.0,
+            "no_scale_embedding": True,
+            "layernorm_embedding": False,
+            "rel_pos_buckets": 128,
+            "max_rel_pos": 512,
+            "no_output_layer": True,
+        }
+        self.config = DecoderConfig(**config_dict)
+        self.model = Decoder(self.config, is_encoder_decoder=False)
+
+    def forward(self, x, prev_tokens=None, self_attn_mask=None, context: dict = None):
+        x, state_dict = self.model(
+            prev_tokens,
+            token_embeddings=x,
+            self_attn_padding_mask=self_attn_mask,
+            encoder_out=context,
+            features_only=True,
+        )
+        return x

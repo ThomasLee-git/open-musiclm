@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from .clap_quantized import ClapQuantized
 from .model_types import NeuralCodec, Wav2Vec
-from .transformer import Transformer
+from .transformer import Transformer, TorchScaleDecoderWrapper
 from .utils import (all_rows_have_eos_id, append_eos_id,
                     batch_unique_consecutive, beartype_jit, ceil_div, default,
                     eval_decorator, exists, float32_to_int16,
@@ -53,7 +53,8 @@ class TokenConditionedTransformer(nn.Module):
         grad_shrink_alpha=0.1,
         use_absolute_position_embeddings=False,
         max_absolute_position_embeddings=262,
-        **kwargs
+        use_subln: bool = False,
+        **kwargs,
     ):
         super().__init__()
 
@@ -81,17 +82,31 @@ class TokenConditionedTransformer(nn.Module):
             if self.use_absolute_position_embeddings:
                 self.absolute_position_embeddings.append(nn.Embedding(max_absolute_position_embeddings, dim))
 
-        self.transformer = Transformer(
-            dim=dim,
-            depth=depth,
-            heads=heads,
-            attn_dropout=attn_dropout,
-            ff_dropout=ff_dropout,
-            cross_attend=has_condition and not cond_as_self_attn_prefix,
-            cond_as_self_attn_prefix=cond_as_self_attn_prefix,
-            grad_shrink_alpha=grad_shrink_alpha,
-            **kwargs
-        )
+        self.use_subln = use_subln
+        if self.use_subln:
+            self.transformer = TorchScaleDecoderWrapper(
+                dim=dim,
+                depth=depth,
+                heads=heads,
+                attn_dropout=attn_dropout,
+                ff_dropout=ff_dropout,
+                cross_attend=has_condition and not cond_as_self_attn_prefix,
+                cond_as_self_attn_prefix=cond_as_self_attn_prefix,
+                grad_shrink_alpha=grad_shrink_alpha,
+                **kwargs,
+            )
+        else:
+            self.transformer = Transformer(
+                dim=dim,
+                depth=depth,
+                heads=heads,
+                attn_dropout=attn_dropout,
+                ff_dropout=ff_dropout,
+                cross_attend=has_condition and not cond_as_self_attn_prefix,
+                cond_as_self_attn_prefix=cond_as_self_attn_prefix,
+                grad_shrink_alpha=grad_shrink_alpha,
+                **kwargs,
+            )
 
     @property
     def device(self):
@@ -144,7 +159,18 @@ class TokenConditionedTransformer(nn.Module):
         tokens = list(itertools.chain(*zip(start_tokens, tokens)))  # [start_1, tokens_1, start_2, tokens_2, ...]
         tokens = torch.cat(tokens, dim=1)
 
-        tokens = self.transformer(tokens, self_attn_mask=self_attn_mask)
+        # ThomasLee
+        if self.use_subln:
+            # create a dummy tokens for decoder
+            dummy_tokens = torch.zeros((*tokens.size()[:2], 1), requires_grad=False).to(
+                tokens.device
+            )
+            # use inverted mask for decoder
+            tokens = self.transformer(
+                tokens, prev_tokens=dummy_tokens, self_attn_mask=~self_attn_mask
+            )
+        else:
+            tokens = self.transformer(tokens, self_attn_mask=self_attn_mask)
 
         split_at = split_at[:-1]  # remove last element (total number of tokens)
         all_pred_tokens = torch.tensor_split(tokens, split_at, dim=1)

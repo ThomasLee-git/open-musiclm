@@ -48,6 +48,8 @@ RelativePositionBiasType = Literal['continuous', 't5', 'none']
 
 @dataclass
 class SemanticConfig:
+    # ThomasLee
+    use_subln: bool = False
     dim: int = 1024
     depth: int = 6
     heads: int = 8
@@ -62,6 +64,8 @@ class SemanticConfig:
 
 @dataclass
 class CoarseConfig:
+    # ThomasLee
+    use_subln: bool = False
     dim: int = 1024
     depth: int = 6
     heads: int = 8
@@ -75,6 +79,8 @@ class CoarseConfig:
     max_absolute_position_embeddings: int = 12 + 100 + 600
 @dataclass
 class FineConfig:
+    # ThomasLee
+    use_subln: bool = False
     dim: int = 1024
     depth: int = 6
     heads: int = 8
