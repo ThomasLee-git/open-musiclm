@@ -16,6 +16,7 @@ from scripts.train_utils import disable_print
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='train rvq to quantize clap embeddings')
     parser.add_argument('--results_folder', default='./results/clap_rvq')
+    parser.add_argument('--project_dir', default=None, type=str)
     parser.add_argument('--model_config', default='./configs/model/musiclm_small.json')
     parser.add_argument('--training_config', default='./configs/training/train_musiclm_fma.json')
     parser.add_argument('--continue_from', default=None, type=str)
@@ -38,7 +39,7 @@ if __name__ == '__main__':
         device=None,
         accelerate_kwargs={
             'log_with': "tensorboard",
-            'project_dir': './logs/clap_rvq'
+            'project_dir': args.project_dir
         },
         config_paths=[args.model_config, args.training_config])
 

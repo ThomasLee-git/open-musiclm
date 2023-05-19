@@ -139,7 +139,8 @@ class SingleStageTrainer(nn.Module):
         cross_entropy_loss_weights: Optional[List[float]]=None,
         ignore_load_errors=True,
         folder=None,
-        blacklist_path:str=None,
+        filelist_path: str = None,
+        blacklist_path: str = None,
         use_preprocessed_data=False,
         lr=3e-4,
         lr_warmup=0,
@@ -265,6 +266,7 @@ class SingleStageTrainer(nn.Module):
 
                 self.ds = SoundDataset(
                     folder,
+                    filelist_path=filelist_path,
                     blacklist_path=blacklist_path,
                     max_length_seconds=data_max_length_seconds,
                     normalize=normalize,
@@ -592,7 +594,9 @@ class ClapRVQTrainer(nn.Module):
         ignore_files: Optional[List[str]]=None,
         ignore_load_errors: bool=True,
         folder=None,
-        wd=0.,
+        filelist_path: str = None,
+        blacklist_path: str = None,
+        wd=0.0,
         max_grad_norm=0.5,
         data_max_length_seconds: Union[float, int] = 10,
         valid_frac=0.05,
@@ -620,6 +624,8 @@ class ClapRVQTrainer(nn.Module):
 
             self.ds = SoundDataset(
                 folder,
+                filelist_path=filelist_path,
+                blacklist_path=blacklist_path,
                 max_length_seconds=data_max_length_seconds,
                 target_sample_hz=audio_conditioner.sample_rate,
                 seq_len_multiple_of=None,

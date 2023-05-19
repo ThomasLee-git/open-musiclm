@@ -116,23 +116,26 @@ class MusicLMModelConfig:
 @dataclass
 class ClapRVQTrainerConfig:
     folder: str
+    filelist_path: str
     num_train_steps: int
     batch_size: int
     accumulate_batches: int
     save_model_every: int
     save_results_every: int
+    blacklist_path: str = None
 
 @dataclass
 class HubertKmeansTrainerConfig:
     folder: str
+    filelist_path: str
     feature_extraction_num_steps: int
     feature_extraction_batch_size: int
+    blacklist_path: str = None
 
 @dataclass
 class SingleStageTrainerConfig:
     stage: str
     folder: str
-    blacklist_path: str
     valid_frac: float
     lr: float
     lr_warmup: int
@@ -147,6 +150,8 @@ class SingleStageTrainerConfig:
     save_predicted_tokens: bool
     save_reconstructed_wave: bool
     use_preprocessed_data: bool
+    filelist_path: str = None
+    blacklist_path: str = None
 
 @dataclass
 class DataPreprocessorConfig:

@@ -66,6 +66,7 @@ class SoundDataset(Dataset):
     def __init__(
         self,
         folder,
+        filelist_path: str = None,
         blacklist_path: str = None,
         exts = ['flac', 'wav', 'mp3'],
         max_length_seconds: Optional[Union[FloatOrInt, Tuple[Optional[FloatOrInt], ...]]] = 1,
@@ -88,17 +89,31 @@ class SoundDataset(Dataset):
 
         files = []
         ignore_files = default(ignore_files, None)
+        # ThomasLee
         if ignore_files is None and blacklist_path:
             ignore_files = get_file_name_list(blacklist_path)
+        if filelist_path:
+            filelist = get_file_name_list(filelist_path)
         num_ignored = 0
-        ignore_file_set = set([f.split('/')[-1] for f in ignore_files])
-        for ext in exts:
-            for file in path.glob(f'**/*.{ext}'):
-                if file.name in ignore_file_set:
+        ignore_file_set = (
+            set([f.split("/")[-1] for f in ignore_files]) if ignore_files else None
+        )
+        if not filelist:
+            for ext in exts:
+                for file in path.glob(f"**/*.{ext}"):
+                    if file.name in ignore_file_set:
+                        num_ignored += 1
+                        continue
+                    else:
+                        files.append(file)
+        else:
+            print(f"using {filelist_path=}")
+            for file_name in filelist:
+                tmp_path = path.joinpath(file_name)
+                if ignore_file_set and (tmp_path.name in ignore_file_set):
                     num_ignored += 1
                     continue
-                else:
-                    files.append(file)
+                files.append(tmp_path)
         assert len(files) > 0, 'no sound files found'
         if num_ignored > 0:
             print(f'skipped {num_ignored} ignored files')
@@ -128,10 +143,12 @@ class SoundDataset(Dataset):
             file = self.files[idx]
             data, sample_hz = torchaudio.load(file)
         except:
+            err_msg = f"failed reading {file=}"
+            print(err_msg)
             if self.ignore_load_errors:
                 return self[torch.randint(0, len(self), (1,)).item()]
             else:
-                raise Exception(f'error loading file {file}')
+                raise Exception(err_msg)
 
         audio_data = self.process_audio(data, sample_hz, pad_to_target_length=True)
         return tuple(audio_data + [file.stem])
