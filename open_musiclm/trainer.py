@@ -663,8 +663,8 @@ class ClapRVQTrainer(nn.Module):
 
         # dataloader iterators
 
-        self.dl_iter = iter(self.dl)
-        self.valid_dl_iter = iter(self.valid_dl)
+        # self.dl_iter = iter(self.dl)
+        # self.valid_dl_iter = iter(self.valid_dl)
 
         self.save_model_every = save_model_every
         self.save_results_every = save_results_every
@@ -715,46 +715,75 @@ class ClapRVQTrainer(nn.Module):
         return self.accelerator.is_local_main_process
 
     def train_step(self):
-        steps = int(self.steps.item())
-
-        self.audio_conditioner.learn_rvq = True
-
-        iters = default(self.accumulate_batches, 1)
-        iters = math.ceil(iters / self.accelerator.num_processes)
-
-        embeds = []
-        for _ in tqdm(range(iters), desc=f'rank={self.rank} local_rank={self.local_rank} {steps=} accumulating batches'):
-            # ThomasLee   
-            try:
-                raw_wave_for_clap = next(self.dl_iter)[0]
-            except:
-                self.dl_iter = iter(self.dl)
-                raw_wave_for_clap = next(self.dl_iter)[0]
-            embed = self.audio_conditioner.forward(audio_input=raw_wave_for_clap.to(self.device), return_embedding=True)
-            # print(f"{rank=} {local_rank=} wav={raw_wave_for_clap.size()} emb={embed.size()}")
+        # ThomasLee
+        embeds = list()
+        acc_train_loss = 0.0
+        accumulate_batches = default(self.accumulate_batches, 1)
+        print(f"rank={self.rank} local_rank={self.local_rank} {accumulate_batches=}")
+        for batch_idx, batch_data in enumerate(self.dl, start=1):
+            raw_wave_for_clap = batch_data[0]
+            loss = None
+            valid_loss = None
+            steps = int(self.steps.item())
+            self.audio_conditioner.learn_rvq = True
+            embed = self.audio_conditioner.forward(
+                audio_input=raw_wave_for_clap, return_embedding=True
+            )
             embeds.append(embed)
-
-        embeds = torch.cat(embeds, dim=0)
-        embeds = self.accelerator.gather_for_metrics(embeds)
-        # print(f"rank={self.rank} local_rank={self.local_rank} embeds={embeds.size()}")
-        loss = self.audio_conditioner.quantize(embeds, return_rvq_loss=True)
-        self.print(f'{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} {steps=} training loss: {loss}')
-        valid_loss = None
-        if not (steps % self.save_results_every):
-            # ThomasLee   
-            try:
-                raw_wave_for_clap = next(self.valid_dl_iter)[0]
-            except:
-                self.valid_dl_iter = iter(self.valid_dl)
-                raw_wave_for_clap = next(self.valid_dl_iter)[0]
-
-            with torch.no_grad():
-                self.audio_conditioner.learn_rvq = False
-                valid_loss = self.audio_conditioner.forward(audio_input=raw_wave_for_clap.to(self.device), return_rvq_loss=True)
-
-            self.print(f'{datetime.datetime.now()}: {steps=} valid loss {valid_loss}')
-
-        if self.is_main:
+            if not (batch_idx % accumulate_batches):
+                # train rvq
+                embeds = torch.cat(embeds, dim=0)
+                embeds = self.accelerator.gather_for_metrics(embeds)
+                print(
+                    f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} embeds={embeds.size()}"
+                )
+                loss = self.audio_conditioner.quantize(embeds, return_rvq_loss=True)
+                print(
+                    f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {loss=}"
+                )
+                # gather loss
+                loss_t = torch.tensor(loss).to(self.accelerator.device)
+                self.accelerator.gather(loss_t)
+                print(
+                    f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} gather_loss={loss_t}"
+                )
+                loss_t /= self.accelerator.num_processes
+                print(
+                    f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} mean={loss_t}"
+                )
+                acc_train_loss = loss_t.item()
+                self.print(
+                    f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} training loss: {acc_train_loss}"
+                )
+                # reset embeds and update
+                del embeds
+                embeds = list()
+                if self.is_main:
+                    self.steps += 1
+                accelerate.utils.broadcast(self.steps)
+                print(
+                    f"rank={self.rank} local_rank={self.local_rank} update steps={self.steps.item()}"
+                )
+                # validation
+                if not (steps % self.save_results_every):
+                    valid_input = None
+                    for batch_data in self.valid_dl:
+                        valid_input = batch_data[0]
+                        break
+                    with torch.no_grad():
+                        self.audio_conditioner.learn_rvq = False
+                        tmp_loss = self.audio_conditioner.forward(
+                            audio_input=valid_input, return_rvq_loss=True
+                        )
+                    # gather
+                    tmp_loss_t = torch.tensor(tmp_loss).to(self.accelerator.device)
+                    self.accelerator.gather(tmp_loss_t)
+                    tmp_loss_t /= self.accelerator.num_processes
+                    valid_loss = tmp_loss_t.item()
+                    self.print(
+                        f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} {steps=} validation loss: {valid_loss}"
+                    )
+            # log
             self.accelerator.log({
                 "train_loss": loss,
                 "valid_loss": valid_loss
@@ -762,17 +791,12 @@ class ClapRVQTrainer(nn.Module):
 
             # save model every so often
 
-            if not (steps % self.save_model_every):
+            if self.is_main and not (steps % self.save_model_every):
                 # save audio conditioner (clap) rvq checkpoint
                 rvq_state_dict = self.accelerator.unwrap_model(self.audio_conditioner).rq.state_dict()
                 torch.save(rvq_state_dict, str(self.results_folder / f'clap.rvq.{steps}.pt'))
                 self.print(f'{datetime.datetime.now()}: {steps=} saving model to {str(self.results_folder)}')
-            # update
-            self.steps += 1
-        accelerate.utils.broadcast(self.steps)
-        # print(f"rank={self.rank} local_rank={self.local_rank} steps_t={steps_t.item()}")
-        print(f"rank={self.rank} local_rank={self.local_rank} update steps={self.steps.item()}")
-        self.accelerator.wait_for_everyone()
+            self.accelerator.wait_for_everyone()
         
 
     def train(self, log_fn=noop):
