@@ -21,8 +21,10 @@ if __name__ == '__main__':
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    print('loading hubert...')
-    hubert_kmeans = create_hubert_kmeans_from_config(model_config, None, device)
+    print("loading hubert...")
+    hubert_kmeans = create_hubert_kmeans_from_config(
+        model_config, None, device, use_batch_kmeans=False
+    )
 
     trainer = create_hubert_kmeans_trainer_from_config(
         model_config=model_config,

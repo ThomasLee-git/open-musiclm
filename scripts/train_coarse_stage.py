@@ -19,6 +19,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='train coarse stage')
     parser.add_argument('--results_folder', default='./results/coarse')
     parser.add_argument('--project_dir', default=None, type=str)
+    parser.add_argument("--use_batch_kmeans", default=True, type=bool)
     parser.add_argument('--continue_from_dir', default=None, type=str)
     parser.add_argument('--continue_from_step', default=None, type=int)
     parser.add_argument('--model_config', default='./configs/model/musiclm_small.json')
@@ -46,8 +47,16 @@ if __name__ == '__main__':
         print('loading clap...')
         clap = create_clap_quantized_from_config(model_config, args.rvq_path, device)
 
-        print('loading wav2vec...')
-        wav2vec = create_hubert_kmeans_from_config(model_config, args.kmeans_path, device)
+        if args.use_batch_kmeans:
+            print("loading wav2vec with batch_kmeans...")
+        else:
+            print("loading wav2vec...")
+        wav2vec = create_hubert_kmeans_from_config(
+            model_config,
+            args.kmeans_path,
+            device,
+            use_batch_kmeans=args.use_batch_kmeans,
+        )
 
     print('loading encodec...')
     encodec_wrapper = create_encodec_from_config(model_config, device)

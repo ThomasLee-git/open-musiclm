@@ -10,6 +10,7 @@ from torchaudio.functional import resample
 from .utils import exists, curtail_to_multiple, zero_mean_unit_var_norm
 from transformers import HubertModel
 from sklearn.cluster import MiniBatchKMeans
+from sklearn.metrics import silhouette_score
 
 import joblib
 import logging
@@ -156,3 +157,135 @@ def get_hubert_kmeans(model_name: str="m-a-p/MERT-v0", kmeans_path: Optional[str
     kmeans = joblib.load(kmeans_path) if exists(kmeans_path) else None
 
     return HfHubertWithKmeans(hubert=wav2vec, kmeans=kmeans, **kwargs)
+
+
+import torch.distributed as dist
+from einops import repeat
+
+
+class BatchKmeans(nn.Module):
+    def __init__(self, k: int, dim: int, ddp=False):
+        super().__init__()
+        self.k = k
+        self.dim = dim
+        self.register_buffer("bins", torch.zeros(k, dim))
+        self.register_buffer("nums", torch.zeros(k))
+        self.register_buffer("codebook", torch.rand(k, dim))
+        self.all_reduce = dist.all_reduce if ddp else lambda *args, **kwargs: None
+
+    def forward(self, x):
+        (batch_size, dim), device = x.shape, x.device
+        dists = torch.cdist(x, self.codebook, p=2)
+        buckets = torch.argmin(dists, dim=-1)
+        self.bins.scatter_add_(dim=0, index=repeat(buckets, "b -> b d", d=dim), src=x)
+        self.nums.scatter_add_(
+            dim=0, index=buckets, src=torch.ones(batch_size).to(device)
+        )
+        return dists.mean()
+
+    @torch.no_grad()
+    def predict(self, x):
+        dists = torch.cdist(x, self.codebook, p=2)
+        buckets = torch.argmin(dists, dim=-1)
+        return buckets
+
+    @torch.no_grad()
+    def silhouette_score_and_dist(self, x):
+        dists = torch.cdist(x, self.codebook, p=2)
+        buckets = torch.argmin(dists, dim=-1)
+        score = silhouette_score(
+            dists.detach().cpu().numpy(), buckets.detach().cpu().numpy()
+        )
+        return score, dists.mean().item()
+
+    def epoch(self):
+        self.all_reduce(self.bins)
+        self.all_reduce(self.nums)
+        self.codebook = self.bins / torch.maximum(
+            self.nums, torch.ones_like(self.nums)
+        ).unsqueeze(dim=-1)
+        self.bins.zero_()
+        self.nums.zero_()
+
+
+class HfHubertWithBatchKmeans(nn.Module):
+    def __init__(
+        self,
+        *,
+        hubert: HubertModel,
+        kmeans: Optional[BatchKmeans] = None,
+        embed_layer: int = 7,
+        target_sample_hz=16000,
+        seq_len_multiple_of=int(16000 / 50),
+        normalize_embeds=True,
+        output_hz: int = 50,
+    ):
+        super().__init__()
+        self.target_sample_hz = target_sample_hz
+        self.output_hz = output_hz
+        self.seq_len_multiple_of = seq_len_multiple_of
+        self.normalize_embeds = normalize_embeds
+        self.embed_layer = embed_layer
+        self.hubert = hubert
+        self.kmeans = kmeans
+        self.codebook_size = self.kmeans.k
+
+    def calc_kmeans(self, embeds):
+        return self.kmeans.forward(embeds)
+
+    @torch.no_grad()
+    def get_embed(self, wav_input: torch.Tensor, input_sample_hz=None):
+        if exists(input_sample_hz):
+            wav_input = resample(wav_input, input_sample_hz, self.target_sample_hz)
+        if exists(self.seq_len_multiple_of):
+            wav_input = curtail_to_multiple(wav_input, self.seq_len_multiple_of)
+        hubert_args = {
+            "input_values": wav_input,
+            # TODO: handle padding
+            "attention_mask": torch.ones_like(wav_input).to(wav_input.device),
+        }
+        outputs = self.hubert(**hubert_args, output_hidden_states=True)
+        embed = outputs.hidden_states[self.embed_layer]
+        if self.normalize_embeds:
+            embed = zero_mean_unit_var_norm(embed)
+        return embed
+
+    def forward(
+        self,
+        wav_input: torch.Tensor,
+        flatten=True,
+        return_embed=False,
+        input_sample_hz=None,
+    ):
+        assert return_embed or exists(
+            self.kmeans
+        ), "kmeans model must be provided if return_embed==False"
+
+        embed = self.get_embed(wav_input, input_sample_hz=input_sample_hz)
+        if return_embed:
+            return embed
+
+        embed, packed_shape = pack([embed], "* d")
+        codebook_indices = self.kmeans.predict(embed)
+
+        if flatten:
+            return codebook_indices
+
+        (codebook_indices,) = unpack(codebook_indices, packed_shape, "*")
+        return codebook_indices
+
+
+def get_hubert_batch_kmeans(
+    model_name: str = "m-a-p/MERT-v0",
+    kmeans_path: Optional[str] = None,
+    codebook_size: int = 1024,
+    emb_dim: int = 768,
+    **kwargs,
+):
+    wav2vec = HubertModel.from_pretrained(model_name, resume_download=True)
+    kmeans = BatchKmeans(k=codebook_size, dim=emb_dim)
+    if kmeans_path:
+        print(f"loading kmeans {kmeans_path}")
+        state_dict = torch.load(kmeans_path, map_location="cpu")
+        kmeans.load_state_dict(state_dict)
+    return HfHubertWithBatchKmeans(hubert=wav2vec, kmeans=kmeans, **kwargs)

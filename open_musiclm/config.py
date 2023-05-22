@@ -10,10 +10,20 @@ from beartype.typing import Literal, Optional, List
 from .clap_quantized import ClapQuantized, create_clap_quantized
 from .encodec_wrapper import EncodecWrapper, create_encodec_24khz
 from .hf_hubert_kmeans import HfHubertWithKmeans, get_hubert_kmeans
-from .open_musiclm import (MusicLM, TokenConditionedTransformer,
-                           create_coarse_transformer, create_fine_transformer,
-                           create_semantic_transformer)
-from .trainer import ClapRVQTrainer, HfHubertKmeansTrainer, SingleStageTrainer
+from .hf_hubert_kmeans import HfHubertWithBatchKmeans, get_hubert_batch_kmeans
+from .open_musiclm import (
+    MusicLM,
+    TokenConditionedTransformer,
+    create_coarse_transformer,
+    create_fine_transformer,
+    create_semantic_transformer,
+)
+from .trainer import (
+    ClapRVQTrainer,
+    HfHubertKmeansTrainer,
+    SingleStageTrainer,
+    HfHubertBatchKmeansTrainer,
+)
 from .preprocess import DataPreprocessor
 from .utils import exists, beartype_jit
 
@@ -235,12 +245,23 @@ def create_clap_quantized_from_config(model_config: MusicLMModelConfig, rvq_path
         ).to(device)
 
 @beartype_jit
-def create_hubert_kmeans_from_config(model_config: MusicLMModelConfig, kmeans_path: Optional[str], device, **kwargs) -> HfHubertWithKmeans:
-    return get_hubert_kmeans(
-        **asdict(model_config.hubert_kmeans_cfg),
-        kmeans_path=kmeans_path,
-        **kwargs,
-    ).to(device)
+def create_hubert_kmeans_from_config(
+    model_config: MusicLMModelConfig,
+    kmeans_path: Optional[str],
+    device,
+    use_batch_kmeans: bool = True,
+    **kwargs,
+) -> HfHubertWithKmeans:
+    if use_batch_kmeans:
+        return get_hubert_batch_kmeans(
+            **asdict(model_config.hubert_kmeans_cfg), kmeans_path=kmeans_path, **kwargs
+        )
+    else:
+        return get_hubert_kmeans(
+            **asdict(model_config.hubert_kmeans_cfg),
+            kmeans_path=kmeans_path,
+            **kwargs,
+        )
 
 @beartype_jit
 def create_encodec_from_config(model_config: MusicLMModelConfig, device, **kwargs) -> EncodecWrapper:
@@ -355,6 +376,26 @@ def create_hubert_kmeans_trainer_from_config(
     ).to(device)
 
     return trainer
+
+@beartype_jit
+def create_hubert_batch_kmeans_trainer_from_config(
+    model_config: MusicLMModelConfig,
+    training_config: MusicLMTrainingConfig,
+    hubert_kmeans: HfHubertWithBatchKmeans,
+    results_folder: str,
+    config_paths: Optional[List[str]] = None,
+    **kwargs,
+):
+    trainer = HfHubertBatchKmeansTrainer(
+        hubert_kmeans=hubert_kmeans,
+        results_folder=results_folder,
+        data_max_length_seconds=model_config.global_cfg.semantic_audio_length_seconds,
+        config_paths=config_paths,
+        **asdict(training_config.hubert_kmeans_trainer_cfg),
+        **kwargs,
+    )
+    return trainer
+
 
 @beartype_jit
 def create_single_stage_trainer_from_config(
