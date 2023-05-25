@@ -161,6 +161,7 @@ def get_hubert_kmeans(model_name: str="m-a-p/MERT-v0", kmeans_path: Optional[str
 
 import torch.distributed as dist
 from einops import repeat
+import os
 
 
 class BatchKmeans(nn.Module):
@@ -168,19 +169,59 @@ class BatchKmeans(nn.Module):
         super().__init__()
         self.k = k
         self.dim = dim
+        self.register_buffer("is_initialized", torch.tensor(False, dtype=torch.bool))
         self.register_buffer("bins", torch.zeros(k, dim))
-        self.register_buffer("nums", torch.zeros(k))
-        self.register_buffer("codebook", torch.rand(k, dim))
+        self.register_buffer("nums", torch.zeros(k, 1))
+        self.register_buffer("codebook", torch.randn(k, dim))
         self.all_reduce = dist.all_reduce if ddp else lambda *args, **kwargs: None
+        self.rank = None
+        self.local_rank = None
+
+    def __init_clusters(self, x):
+        from sklearn.cluster import kmeans_plusplus
+
+        if self.is_initialized:
+            return
+
+        if dist.is_initialized():
+            self.rank = dist.get_rank()
+            self.local_rank = int(os.environ["LOCAL_RANK"])
+
+        # gather x
+        print(f"rank={self.rank} local_rank={self.local_rank} x_size {x.size()}")
+        if dist.is_initialized():
+            x_list = [x.clone() for _ in range(dist.get_world_size())]
+            dist.all_gather(x_list, x)
+            x = torch.cat(x_list, dim=0)
+            print(
+                f"rank={self.rank} local_rank={self.local_rank} gathered_x_size {x.size()}"
+            )
+        cluster_centers_t = torch.zeros_like(self.codebook).to(x.device)
+        if self.rank is None or self.rank == 0:
+            x_in = x.cpu().numpy()
+            # init with kmeans
+            print(
+                f"rank={self.rank} local_rank={self.local_rank} init cluster centers using kmeans++ ..."
+            )
+            cluster_centers, indices = kmeans_plusplus(x_in, n_clusters=self.k)
+            print(f"rank={self.rank} local_rank={self.local_rank} done")
+            cluster_centers_t = torch.from_numpy(cluster_centers).to(x.device)
+        # broadcast
+        if dist.is_initialized():
+            dist.broadcast(cluster_centers_t, 0)
+        # assign
+        self.codebook.data.copy_(cluster_centers_t)
+        self.is_initialized.fill_(True)
 
     def forward(self, x):
+        self.__init_clusters(x)
         (batch_size, dim), device = x.shape, x.device
         dists = torch.cdist(x, self.codebook, p=2)
-        buckets = torch.argmin(dists, dim=-1)
-        self.bins.scatter_add_(dim=0, index=repeat(buckets, "b -> b d", d=dim), src=x)
-        self.nums.scatter_add_(
-            dim=0, index=buckets, src=torch.ones(batch_size).to(device)
-        )
+        buckets = torch.argmin(dists, dim=-1, keepdim=True)
+        ones = torch.ones(buckets.size()).to(device)
+        repeated_buckets = repeat(buckets, "b 1->b d", d=dim)
+        self.bins.scatter_add_(dim=0, index=repeated_buckets, src=x)
+        self.nums.scatter_add_(dim=0, index=buckets, src=ones)
         return dists.mean()
 
     @torch.no_grad()
@@ -201,9 +242,10 @@ class BatchKmeans(nn.Module):
     def epoch(self):
         self.all_reduce(self.bins)
         self.all_reduce(self.nums)
-        self.codebook = self.bins / torch.maximum(
-            self.nums, torch.ones_like(self.nums)
-        ).unsqueeze(dim=-1)
+        update_indices = (self.nums > 0).squeeze()
+        self.codebook[update_indices] = (
+            self.bins[update_indices] / self.nums[update_indices]
+        )
         self.bins.zero_()
         self.nums.zero_()
 
