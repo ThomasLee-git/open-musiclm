@@ -842,6 +842,8 @@ class HfHubertKmeansTrainer(nn.Module):
         ignore_files: Optional[List[str]]=None,
         ignore_load_errors: bool=True,
         folder=None,
+        filelist_path: str = None,
+        blacklist_path: str = None,
         data_max_length_seconds: Union[float, int] = 1,
         results_folder='./results',
         accelerate_kwargs: dict = {},
@@ -862,6 +864,8 @@ class HfHubertKmeansTrainer(nn.Module):
 
             self.ds = SoundDataset(
                 folder,
+                filelist_path=filelist_path,
+                blacklist_path=blacklist_path,
                 max_length_seconds=data_max_length_seconds,
                 normalize=True,
                 target_sample_hz=hubert_kmeans.target_sample_hz,
