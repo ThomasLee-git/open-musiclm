@@ -825,6 +825,35 @@ class ClapRVQTrainer(nn.Module):
 
         self.print('training complete')
 
+    # ThomasLee
+    @torch.no_grad()
+    def stat_distribution(self):
+        self.audio_conditioner.learn_rvq = False
+        num_classes = self.audio_conditioner.codebook_size
+        num_quantizers = self.audio_conditioner.rq.num_quantizers
+        hist = np.zeros((num_quantizers, num_classes))
+        num_samples = 0
+        for batch_idx, batch_data in enumerate(self.dl, start=1):
+            batch_hist = np.zeros((num_quantizers, num_classes))
+            raw_wave_for_clap = batch_data[0]
+            embed = self.audio_conditioner.forward(
+                audio_input=raw_wave_for_clap, return_embedding=True
+            )
+            indices = self.audio_conditioner.quantize(
+                embed, return_rvq_loss=False
+            ).squeeze()
+            onehot_indices = torch.nn.functional.one_hot(
+                indices, num_classes=num_classes
+            )
+            sum_onehot = torch.sum(onehot_indices, dim=0)
+            batch_hist += sum_onehot.cpu().numpy()
+            hist += batch_hist
+            num_samples += indices.size(0)
+            print(f"{datetime.datetime.now()}: {batch_idx=} {num_samples=}")
+        hist /= num_samples
+        np.save("claprvq_hist", hist)
+        print("done")
+
 
 @beartype_jit
 class HfHubertKmeansTrainer(nn.Module):
