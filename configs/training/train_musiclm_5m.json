@@ -1,7 +1,7 @@
 {
     "clap_rvq_trainer_cfg": {
         "folder": "./data",
-        "filelist_path": "./data/song_list.txt",
+        "filelist_path": "./data/4m_list.txt",
         "num_train_steps": 100000,
         "batch_size": 64,
         "accumulate_batches": 32,
@@ -10,14 +10,14 @@
     },
     "hubert_kmeans_trainer_cfg": {
         "folder": "./data",
-        "filelist_path": "./data/song_list.txt",
+        "filelist_path": "./data/4m_list.txt",
         "feature_extraction_num_steps": 320,
         "feature_extraction_batch_size": 32
     },
     "semantic_trainer_cfg": {
         "stage": "semantic",
         "folder": "./data",
-        "filelist_path": "./data/song_list.txt",
+        "filelist_path": "./data/4m_list.txt",
         "valid_frac": 0.05,
         "lr": 0.0003,
         "lr_warmup": 3000,
@@ -36,7 +36,7 @@
     "coarse_trainer_cfg": {
         "stage": "coarse",
         "folder": "./data",
-        "filelist_path": "./data/song_list.txt",
+        "filelist_path": "./data/4m_list.txt",
         "valid_frac": 0.05,
         "lr": 0.0003,
         "lr_warmup": 6000,
@@ -55,7 +55,7 @@
     "fine_trainer_cfg": {
         "stage": "fine",
         "folder": "./data",
-        "filelist_path": "./data/song_list.txt",
+        "filelist_path": "./data/4m_list.txt",
         "valid_frac": 0.05,
         "lr": 0.0003,
         "lr_warmup": 0,

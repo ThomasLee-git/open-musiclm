@@ -19,7 +19,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="train semantic stage")
     parser.add_argument("--results_folder", default=None, type=str)
     parser.add_argument("--project_dir", default=None, type=str)
-    parser.add_argument("--use_batch_kmeans", default=True, type=bool)
+    parser.add_argument(
+        "--use_batch_kmeans", default=True, action=argparse.BooleanOptionalAction
+    )
     parser.add_argument("--continue_from_dir", default=None, type=str)
     parser.add_argument("--continue_from_step", default=None, type=int)
     parser.add_argument("--model_config", default=None, type=str)
@@ -50,7 +52,7 @@ if __name__ == "__main__":
         if args.use_batch_kmeans:
             print("loading wav2vec with batch_kmeans...")
         else:
-            print("loading wav2vec...")
+            print("loading wav2vec with original kmeans...")
         wav2vec = create_hubert_kmeans_from_config(
             model_config,
             args.kmeans_path,
