@@ -12,7 +12,7 @@
         "folder": "./data",
         "filelist_path": "./data/4m_list.txt",
         "feature_extraction_num_steps": 320,
-        "feature_extraction_batch_size": 32
+        "feature_extraction_batch_size": 64
     },
     "semantic_trainer_cfg": {
         "stage": "semantic",
@@ -40,7 +40,7 @@
         "valid_frac": 0.05,
         "lr": 0.0003,
         "lr_warmup": 6000,
-        "batch_size": 12,
+        "batch_size": 16,
         "grad_accum_every": 8,
         "wd": 0.01,
         "max_grad_norm": 0.5,

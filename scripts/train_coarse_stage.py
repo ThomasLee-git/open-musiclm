@@ -79,7 +79,8 @@ if __name__ == "__main__":
         accelerate_kwargs={
             'log_with': "tensorboard",
             'project_dir': args.project_dir,
-            "split_batches": True
+            "split_batches": True,
+            "gradient_accumulation_steps": training_config.coarse_trainer_cfg.grad_accum_every,
         },
         config_paths=[args.model_config, args.training_config])
 

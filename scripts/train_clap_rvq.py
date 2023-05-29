@@ -38,8 +38,9 @@ if __name__ == '__main__':
         results_folder=args.results_folder,
         device=None,
         accelerate_kwargs={
-            'log_with': "tensorboard",
-            'project_dir': args.project_dir
+            "log_with": "tensorboard",
+            "project_dir": args.project_dir,
+            # ThomasLee: DONOT use gradient accumulation since backward is not performed
         },
         config_paths=[args.model_config, args.training_config])
 

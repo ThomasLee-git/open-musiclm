@@ -4,6 +4,7 @@ import sqlite3
 from functools import partial, wraps
 from itertools import cycle
 from pathlib import Path
+import pickle
 
 import numpy as np
 import torch
@@ -19,6 +20,21 @@ from torchaudio.functional import resample
 from .utils import (beartype_jit, curtail_to_multiple, default,
                     float32_to_int16, int16_to_float32,
                     zero_mean_unit_var_norm)
+
+from multiprocessing import shared_memory
+from copy import deepcopy
+from faad_wrapper import faad_module
+
+
+# ThomasLee
+def read_m4a(file_name: str):
+    data, num_samples, num_channels, sample_rate = faad_module.faad_decode_m4a(
+        file_name
+    )
+    data = np.reshape(data, (num_samples, num_channels))
+    data = data.T
+    return data, int(sample_rate)
+
 
 # helper functions
 
@@ -65,10 +81,13 @@ FloatOrInt = Union[float, int]
 class SoundDataset(Dataset):
     def __init__(
         self,
+        # ThomasLee
+        np_list,
+        np_addr_list,
         folder,
-        filelist_path: str = None,
-        blacklist_path: str = None,
-        exts = ['flac', 'wav', 'mp3'],
+        # filelist_path: str = None,
+        # blacklist_path: str = None,
+        # exts = ['flac', 'wav', 'mp3'],
         max_length_seconds: Optional[Union[FloatOrInt, Tuple[Optional[FloatOrInt], ...]]] = 1,
         normalize: Union[bool, Tuple[bool, ...]] = False,
         target_sample_hz: OptionalIntOrTupleInt = None,
@@ -77,152 +96,230 @@ class SoundDataset(Dataset):
         ignore_load_errors=True,
         random_crop=True,
     ):
-        # ThomasLee
-        def get_file_name_list(path:str)->list:
-            with open(path, mode="r") as rf:
-                name_list = rf.read().splitlines()
-            return name_list
-
         super().__init__()
-        path = Path(folder)
-        assert path.exists(), 'folder does not exist'
 
-        files = []
-        ignore_files = default(ignore_files, None)
-        # ThomasLee
-        if ignore_files is None and blacklist_path:
-            ignore_files = get_file_name_list(blacklist_path)
-        if filelist_path:
-            filelist = get_file_name_list(filelist_path)
-        num_ignored = 0
-        ignore_file_set = (
-            set([f.split("/")[-1] for f in ignore_files]) if ignore_files else None
-        )
-        if not filelist:
-            for ext in exts:
-                for file in path.glob(f"**/*.{ext}"):
-                    if file.name in ignore_file_set:
-                        num_ignored += 1
-                        continue
-                    else:
-                        files.append(file)
-        else:
-            print(f"using {filelist_path=}")
-            for file_name in filelist:
-                tmp_path = path.joinpath(file_name)
-                if ignore_file_set and (tmp_path.name in ignore_file_set):
-                    num_ignored += 1
-                    continue
-                files.append(tmp_path)
-        assert len(files) > 0, 'no sound files found'
-        if num_ignored > 0:
-            print(f'skipped {num_ignored} ignored files')
-
-        self.files = files
+        self.np_list = np_list
+        self.np_addr_list = np_addr_list
+        self.folder = folder
         self.ignore_load_errors = ignore_load_errors
         self.random_crop = random_crop
 
-        self.target_sample_hz = cast_tuple(target_sample_hz)
+        self.target_sample_hz = np.array(cast_tuple(target_sample_hz))
         num_outputs = len(self.target_sample_hz)
 
-        self.max_length_seconds = cast_tuple(max_length_seconds, num_outputs)
-        self.max_length = tuple([int(s * hz) if exists(s) else None for s, hz in zip(self.max_length_seconds, self.target_sample_hz)])
+        self.max_length_seconds = np.array(cast_tuple(max_length_seconds, num_outputs))
+        self.max_lengths = np.array(
+            [
+                int(s * hz) if exists(s) else None
+                for s, hz in zip(self.max_length_seconds, self.target_sample_hz)
+            ]
+        )
 
-        self.normalize = cast_tuple(normalize, num_outputs)
+        # sort by max_length_seconds, while moving None to the beginning
+        self.sorted_max_length_seconds = np.array(
+            sorted(
+                enumerate(self.max_length_seconds),
+                key=lambda t: (t[1] is not None, t[1]),
+                reverse=True,
+            )
+        )
 
-        self.seq_len_multiple_of = cast_tuple(seq_len_multiple_of, num_outputs)
+        self.normalize = np.array(cast_tuple(normalize, num_outputs))
 
-        assert len(self.max_length) == len(self.max_length_seconds) == len(
-            self.target_sample_hz) == len(self.seq_len_multiple_of) == len(self.normalize)
+        self.seq_len_multiple_of = np.array(
+            cast_tuple(seq_len_multiple_of, num_outputs)
+        )
+
+        assert (
+            len(self.max_lengths)
+            == len(self.max_length_seconds)
+            == len(self.target_sample_hz)
+            == len(self.seq_len_multiple_of)
+            == len(self.normalize)
+        )
 
     def __len__(self):
-        return len(self.files)
+        return len(self.np_addr_list)
 
     def __getitem__(self, idx):
-        try:
-            file = self.files[idx]
-            data, sample_hz = torchaudio.load(file)
-        except:
-            err_msg = f"failed reading {file=}"
-            print(err_msg)
-            if self.ignore_load_errors:
-                return self[torch.randint(0, len(self), (1,)).item()]
+        while True:
+            start = 0 if idx == 0 else self.np_addr_list[idx - 1]
+            end = self.np_addr_list[idx]
+            file_path = pickle.loads(memoryview(self.np_list[start:end]))
+            tmp_file = Path("data").joinpath(file_path)
+            try:
+                data, sample_hz = read_m4a(tmp_file.as_posix())
+                data = torch.from_numpy(data)
+                break
+            except:
+                new_idx = torch.randint(0, len(self), (1,)).item()
+                err_msg = f"failed reading {idx=} {tmp_file.as_posix()} try {new_idx=}"
+                print(err_msg)
+                idx = new_idx
+        audio_data = process_audio2(
+            data,
+            sample_hz,
+            self.target_sample_hz,
+            self.sorted_max_length_seconds,
+            self.max_lengths,
+            self.seq_len_multiple_of,
+            self.normalize,
+            self.random_crop,
+            pad_to_target_length=True,
+        )
+        return tuple(audio_data + [tmp_file.stem])
+
+    # def process_audio(self, data, sample_hz, pad_to_target_length=True):
+
+    #     if data.shape[0] > 1:
+    #         # the audio has more than 1 channel, convert to mono
+    #         data = torch.mean(data, dim=0).unsqueeze(0)
+
+    #     # recursively crop the audio at random in the order of longest to shortest max_length_seconds, padding when necessary.
+    #     # e.g. if max_length_seconds = (10, 4), pick a 10 second crop from the original, then pick a 4 second crop from the 10 second crop
+    #     # also use normalized data when specified
+
+    #     temp_data = data
+    #     temp_data_normalized = zero_mean_unit_var_norm(data)
+
+    #     num_outputs = len(self.target_sample_hz)
+    #     data = [None for _ in range(num_outputs)]
+
+    #     for unsorted_i, max_length_seconds in self.sorted_max_length_seconds:
+
+    #         if exists(max_length_seconds):
+    #             audio_length = temp_data.size(1)
+    #             target_length = int(max_length_seconds * sample_hz)
+
+    #             if audio_length > target_length:
+    #                 max_start = audio_length - target_length
+    #                 start = torch.randint(0, max_start, (1, )) if self.random_crop else 0
+
+    #                 temp_data = temp_data[:, start:start + target_length]
+    #                 temp_data_normalized = temp_data_normalized[:, start:start + target_length]
+    #             else:
+    #                 if pad_to_target_length:
+    #                     temp_data = F.pad(temp_data, (0, target_length - audio_length), 'constant')
+    #                     temp_data_normalized = F.pad(temp_data_normalized, (0, target_length - audio_length), 'constant')
+
+    #         data[unsorted_i] = temp_data_normalized if self.normalize[unsorted_i] else temp_data
+    #     # resample if target_sample_hz is not None in the tuple
+    #     data_tuple = tuple((resample(d, sample_hz, target_sample_hz) if exists(target_sample_hz) else d) for d, target_sample_hz in zip(data, self.target_sample_hz))
+    #     # quantize non-normalized audio to a valid waveform
+    #     data_tuple = tuple(d if self.normalize[i] else int16_to_float32(float32_to_int16(d)) for i, d in enumerate(data_tuple))
+
+    #     output = []
+
+    #     # process each of the data resample at different frequencies individually
+
+    #     for data, max_length, seq_len_multiple_of in zip(
+    #         data_tuple, self.max_lengths, self.seq_len_multiple_of
+    #     ):
+    #         audio_length = data.size(1)
+
+    #         if exists(max_length) and pad_to_target_length:
+    #             assert audio_length == max_length, f'audio length {audio_length} does not match max_length {max_length}.'
+
+    #         data = rearrange(data, '1 ... -> ...')
+
+    #         if exists(seq_len_multiple_of):
+    #             data = curtail_to_multiple(data, seq_len_multiple_of)
+
+    #         output.append(data.float())
+
+    #     # cast from list to tuple
+
+    #     # output = tuple(output)
+
+    #     # return only one audio, if only one target resample freq
+
+    #     # if num_outputs == 1:
+    #     #     return output[0]
+
+    #     return output
+
+
+def process_audio2(
+    data,
+    sample_hz,
+    target_sample_hz_list: np.ndarray,
+    sorted_max_length_second_list: np.ndarray,
+    max_length_list: np.ndarray,
+    seq_len_multiple_of_list: np.ndarray,
+    normalize: np.ndarray,
+    random_crop: bool,
+    pad_to_target_length: bool,
+):
+    if data.shape[0] > 1:
+        # the audio has more than 1 channel, convert to mono
+        data = torch.mean(data, dim=0).unsqueeze(0)
+
+    # recursively crop the audio at random in the order of longest to shortest max_length_seconds, padding when necessary.
+    # e.g. if max_length_seconds = (10, 4), pick a 10 second crop from the original, then pick a 4 second crop from the 10 second crop
+    # also use normalized data when specified
+
+    temp_data = data
+    temp_data_normalized = zero_mean_unit_var_norm(data)
+
+    num_outputs = len(target_sample_hz_list)
+    crop_data_list = [None for _ in range(num_outputs)]
+
+    for unsorted_i, max_length_seconds in sorted_max_length_second_list:
+        unsorted_i = int(unsorted_i)
+        if exists(max_length_seconds):
+            audio_length = temp_data.size(1)
+            target_length = int(max_length_seconds * sample_hz)
+            if audio_length >= target_length:
+                max_start = audio_length - target_length
+                start = (
+                    torch.randint(0, max_start, (1,))
+                    if (max_start > 0 and random_crop)
+                    else 0
+                )
+                temp_data = temp_data[:, start : start + target_length]
+                temp_data_normalized = temp_data_normalized[
+                    :, start : start + target_length
+                ]
             else:
-                raise Exception(err_msg)
+                if pad_to_target_length:
+                    temp_data = F.pad(
+                        temp_data, (0, target_length - audio_length), "constant"
+                    )
+                    temp_data_normalized = F.pad(
+                        temp_data_normalized,
+                        (0, target_length - audio_length),
+                        "constant",
+                    )
+        crop_data_list[unsorted_i] = (
+            temp_data_normalized if normalize[unsorted_i] else temp_data
+        )
+    # resample if target_sample_hz is not None in the tuple
+    data_tuple = tuple(
+        (resample(d, sample_hz, target_sample_hz) if exists(target_sample_hz) else d)
+        for d, target_sample_hz in zip(crop_data_list, target_sample_hz_list)
+    )
+    # quantize non-normalized audio to a valid waveform
+    data_tuple = tuple(
+        d if normalize[i] else int16_to_float32(float32_to_int16(d))
+        for i, d in enumerate(data_tuple)
+    )
+    # length
+    output = [None for _ in range(num_outputs)]
+    for idx, (src_data, max_length, seq_len_multiple_of) in enumerate(
+        zip(data_tuple, max_length_list, seq_len_multiple_of_list)
+    ):
+        audio_length = src_data.size(-1)
+        if exists(max_length) and pad_to_target_length:
+            assert (
+                audio_length == max_length
+            ), f"audio length {audio_length} does not match max_length {max_length}."
+        if exists(seq_len_multiple_of):
+            src_data = curtail_to_multiple(src_data, seq_len_multiple_of)
+        src_data = rearrange(src_data, "1 ... -> ...")
+        output[idx] = src_data
+    del temp_data, temp_data_normalized, data_tuple
+    return output
 
-        audio_data = self.process_audio(data, sample_hz, pad_to_target_length=True)
-        return tuple(audio_data + [file.stem])
-
-    def process_audio(self, data, sample_hz, pad_to_target_length=True):
-
-        if data.shape[0] > 1:
-            # the audio has more than 1 channel, convert to mono
-            data = torch.mean(data, dim=0).unsqueeze(0)
-
-        # recursively crop the audio at random in the order of longest to shortest max_length_seconds, padding when necessary.
-        # e.g. if max_length_seconds = (10, 4), pick a 10 second crop from the original, then pick a 4 second crop from the 10 second crop
-        # also use normalized data when specified
-
-        temp_data = data
-        temp_data_normalized = zero_mean_unit_var_norm(data)
-
-        num_outputs = len(self.target_sample_hz)
-        data = [None for _ in range(num_outputs)]
-
-        sorted_max_length_seconds = sorted(
-            enumerate(self.max_length_seconds),
-            key=lambda t: (t[1] is not None, t[1])) # sort by max_length_seconds, while moving None to the beginning
-
-        for unsorted_i, max_length_seconds in sorted_max_length_seconds:
-
-            if exists(max_length_seconds):
-                audio_length = temp_data.size(1)
-                target_length = int(max_length_seconds * sample_hz)
-
-                if audio_length > target_length:
-                    max_start = audio_length - target_length
-                    start = torch.randint(0, max_start, (1, )) if self.random_crop else 0
-
-                    temp_data = temp_data[:, start:start + target_length]
-                    temp_data_normalized = temp_data_normalized[:, start:start + target_length]
-                else:
-                    if pad_to_target_length:
-                        temp_data = F.pad(temp_data, (0, target_length - audio_length), 'constant')
-                        temp_data_normalized = F.pad(temp_data_normalized, (0, target_length - audio_length), 'constant')
-
-            data[unsorted_i] = temp_data_normalized if self.normalize[unsorted_i] else temp_data
-        # resample if target_sample_hz is not None in the tuple
-        data_tuple = tuple((resample(d, sample_hz, target_sample_hz) if exists(target_sample_hz) else d) for d, target_sample_hz in zip(data, self.target_sample_hz))
-        # quantize non-normalized audio to a valid waveform
-        data_tuple = tuple(d if self.normalize[i] else int16_to_float32(float32_to_int16(d)) for i, d in enumerate(data_tuple))
-
-        output = []
-
-        # process each of the data resample at different frequencies individually
-
-        for data, max_length, seq_len_multiple_of in zip(data_tuple, self.max_length, self.seq_len_multiple_of):
-            audio_length = data.size(1)
-
-            if exists(max_length) and pad_to_target_length:
-                assert audio_length == max_length, f'audio length {audio_length} does not match max_length {max_length}.'
-
-            data = rearrange(data, '1 ... -> ...')
-
-            if exists(seq_len_multiple_of):
-                data = curtail_to_multiple(data, seq_len_multiple_of)
-
-            output.append(data.float())
-
-        # cast from list to tuple
-
-        # output = tuple(output)
-
-        # return only one audio, if only one target resample freq
-
-        # if num_outputs == 1:
-        #     return output[0]
-
-        return output
 
 # dataloader functions
 
@@ -262,9 +359,13 @@ def curtail_to_shortest_collate(data):
 def pad_to_longest_fn(data):
     return pad_sequence(data, batch_first = True)
 
-def get_dataloader(ds, pad_to_longest = True, **kwargs):
-    collate_fn = pad_to_longest_fn if pad_to_longest else curtail_to_shortest_collate
-    return DataLoader(ds, collate_fn = collate_fn, num_workers=8, **kwargs)
+# def get_dataloader(ds, pad_to_longest = True, **kwargs):
+#     collate_fn = pad_to_longest_fn if pad_to_longest else curtail_to_shortest_collate
+#     return DataLoader(ds, collate_fn=collate_fn, **kwargs)
+
+
+def get_dataloader(ds, **kwargs):
+    return DataLoader(ds, **kwargs)
 
 
 @beartype_jit

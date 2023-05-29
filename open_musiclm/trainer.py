@@ -9,6 +9,7 @@ import os
 # ThomasLee
 import datetime
 import accelerate
+from .mp_data import get_distributed_shared_filelist
 
 import numpy as np
 import torch
@@ -159,7 +160,12 @@ class SingleStageTrainer(nn.Module):
     ):
         super().__init__()
         kwargs_handler = DistributedDataParallelKwargs(find_unused_parameters=True)
-        self.accelerator = Accelerator(**accelerate_kwargs, kwargs_handlers=[kwargs_handler])
+        self.accelerator = Accelerator(
+            **accelerate_kwargs, kwargs_handlers=[kwargs_handler]
+        )
+        # ThomasLee
+        self.rank = self.accelerator.process_index
+        self.local_rank = self.accelerator.local_process_index
 
         self.log_with = accelerate_kwargs['log_with'] if 'log_with' in accelerate_kwargs else None
 
@@ -262,12 +268,27 @@ class SingleStageTrainer(nn.Module):
             self.ds = dataset
             if not exists(self.ds):
                 assert exists(
-                    folder), 'folder must be passed in, if not passing in a custom dataset for text conditioned audio synthesis training'
-
+                    folder
+                ), "folder must be passed in, if not passing in a custom dataset for text conditioned audio synthesis training"
+                np_list, np_addr_list = get_distributed_shared_filelist(
+                    self.accelerator.num_processes,
+                    self.rank,
+                    self.local_rank,
+                    filelist_path,
+                    blacklist_path,
+                )
+                assert (
+                    np_list is not None
+                ), f"rank={self.rank} local_rank={self.local_rank} np_list is None"
+                assert (
+                    np_addr_list is not None
+                ), f"rank={self.rank} local_rank={self.local_rank} np_addr_list is None"
                 self.ds = SoundDataset(
+                    np_list,
+                    np_addr_list,
                     folder,
-                    filelist_path=filelist_path,
-                    blacklist_path=blacklist_path,
+                    # filelist_path=filelist_path,
+                    # blacklist_path=blacklist_path,
                     max_length_seconds=data_max_length_seconds,
                     normalize=normalize,
                     target_sample_hz=target_sample_hz,
@@ -290,16 +311,25 @@ class SingleStageTrainer(nn.Module):
             self.print(f'training with shared training and valid dataset of {len(self.ds)} samples')
 
         # dataloader
-
+        dataloader_kwargs = {
+            "batch_size": batch_size,
+            "shuffle": True,
+            "pin_memory": True,
+            "persistent_workers": True,
+            "num_workers": 8,
+            # "multiprocessing_context": "forkserver",
+        }
         if self.use_preprocessed_data:
-            self.dl = get_preprocessed_dataloader(self.ds, batch_size=batch_size, shuffle=True)
-            self.valid_dl = get_preprocessed_dataloader(self.valid_ds, batch_size=batch_size, shuffle=True)
+            self.dl = get_preprocessed_dataloader(self.ds, **dataloader_kwargs)
+            self.valid_dl = get_preprocessed_dataloader(
+                self.valid_ds, **dataloader_kwargs
+            )
         else:
-            self.dl = get_dataloader(self.ds, batch_size=batch_size, shuffle=True)
-            self.valid_dl = get_dataloader(self.valid_ds, batch_size=batch_size, shuffle=True)
+            self.dl = get_dataloader(self.ds, **dataloader_kwargs)
+            self.valid_dl = get_dataloader(self.valid_ds, **dataloader_kwargs)
 
         # prepare with accelerator
-        # ThomasLee: according to accelerate documentation, optimizer SHOULD NOT be passed if scheduler is present
+        # ThomasLee: according to accelerate documentation, modules SHOULD be passed together
         if exists(self.scheduler):
             (
                 self.train_wrapper,
@@ -377,11 +407,8 @@ class SingleStageTrainer(nn.Module):
             for config_path in config_paths:
                 copy_file_to_folder(config_path, configs_folder)
 
-        # ThomasLee
-        self.rank = self.accelerator.process_index
-        self.local_rank = self.accelerator.local_process_index
-        self.to(self.accelerator.device)
         print(f"dataloader len {len(self.dl)}")
+        self.to(self.accelerator.device)
         self.accelerator.wait_for_everyone()
 
     def save(self, model_path, optim_path, scheduler_path=None):
@@ -452,7 +479,9 @@ class SingleStageTrainer(nn.Module):
             steps = int(self.steps.item())
             with self.accelerator.accumulate(self.train_wrapper):
                 batch_data, batch_names = batch[:-1], batch[-1]
-                print(f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {batch_names=}")
+                print(
+                    f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {batch_names=}"
+                )
                 data_kwargs = dict(zip(self.ds_fields, batch_data))
                 loss, _, _ = self.train_wrapper(**data_kwargs, return_loss=True)
                 acc_train_loss += loss.item()
@@ -470,10 +499,11 @@ class SingleStageTrainer(nn.Module):
                         acc_train_loss_t
                     )
                     acc_train_loss = gathered_acc_train_loss_t.mean().item()
-                    print(f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {acc_train_loss=}")
-                    self.print(f"{datetime.datetime.now()}: {steps=} {batch_idx=} {acc_train_loss=} {grad_norms=}")
+                    self.print(
+                        f"{datetime.datetime.now()}: {steps=} {batch_idx=} {acc_train_loss=} {grad_norms=}"
+                    )
                     train_loss = acc_train_loss
-                    acc_train_loss = 0.
+                    acc_train_loss = 0.0
                 self.optim.step()
                 if exists(self.scheduler):
                     self.scheduler.step()
@@ -481,12 +511,10 @@ class SingleStageTrainer(nn.Module):
 
             # sample results every so often
             if not (steps % self.save_results_every):
-            # if steps % self.save_results_every:
                 self.transformer.eval()
                 data_kwargs = None
                 for batch in self.valid_dl:
                     batch_data, batch_names = batch[:-1], batch[-1]
-                    print(f"rank={self.rank} local_rank={self.local_rank} validation {batch_names=}")
                     data_kwargs = dict(zip(self.ds_fields, batch_data))
                     break
                 with torch.no_grad():
@@ -501,20 +529,37 @@ class SingleStageTrainer(nn.Module):
                     pred_tokens = pred_tokens.detach().cpu().long()
                     gt_tokens = gt_tokens.detach().cpu().long()
                     valid_accuracy = (pred_tokens == gt_tokens).float().mean().item()
-                    valid_loss = self.accelerator.reduce(valid_loss, 'mean').item()
-                    self.print(f'{datetime.datetime.now()}: {steps=} {valid_loss=} {valid_accuracy=}')
+                    valid_loss = self.accelerator.reduce(valid_loss, "mean").item()
+                    self.print(
+                        f"{datetime.datetime.now()}: {steps=} {valid_loss=} {valid_accuracy=}"
+                    )
                 if self.is_main and self.save_predicted_tokens:
                     # interleave pred_tokens and gt_tokens and save to a text file
 
                     assert exists(self.tokens_folder)
 
-                    interleave = torch.empty((pred_tokens.shape[0] + gt_tokens.shape[0], pred_tokens.shape[1]), dtype=pred_tokens.dtype)
+                    interleave = torch.empty(
+                        (
+                            pred_tokens.shape[0] + gt_tokens.shape[0],
+                            pred_tokens.shape[1],
+                        ),
+                        dtype=pred_tokens.dtype,
+                    )
                     interleave[0::2] = pred_tokens
                     interleave[1::2] = gt_tokens
 
-                    np.savetxt(str(self.tokens_folder / f'{self.stage}.tokens.{steps}.txt'), interleave, fmt='%-6s', header='predicted and ground truth tokens from the validation set. row 0%2 is predicted, 1%2 is ground truth\n ')
+                    np.savetxt(
+                        str(self.tokens_folder / f"{self.stage}.tokens.{steps}.txt"),
+                        interleave,
+                        fmt="%-6s",
+                        header="predicted and ground truth tokens from the validation set. row 0%2 is predicted, 1%2 is ground truth\n ",
+                    )
 
-                if self.is_main and self.save_reconstructed_wave and (self.stage == 'coarse' or self.stage=='fine'):
+                if (
+                    self.is_main
+                    and self.save_reconstructed_wave
+                    and (self.stage == "coarse" or self.stage == "fine")
+                ):
                     # For coarse and fine stages, reconstruct teacher-forced wave from logits
 
                     assert exists(self.neural_codec)
@@ -524,12 +569,18 @@ class SingleStageTrainer(nn.Module):
                     pred_tokens[pred_tokens == self.transformer.eos_ids[-1]] = 0
 
                     num_quantizers = self.transformer.token_sequences[-1].num_quantizers
-                    pred_tokens = rearrange(pred_tokens, 'b (n q) -> b n q', q=num_quantizers)
+                    pred_tokens = rearrange(
+                        pred_tokens, "b (n q) -> b n q", q=num_quantizers
+                    )
 
-                    if self.stage == 'fine':
+                    if self.stage == "fine":
                         coarse_tokens = all_labels[-2][:, :-1]
-                        coarse_quantizers = self.transformer.token_sequences[-2].num_quantizers
-                        coarse_tokens = rearrange(coarse_tokens, 'b (n q) -> b n q', q=coarse_quantizers)
+                        coarse_quantizers = self.transformer.token_sequences[
+                            -2
+                        ].num_quantizers
+                        coarse_tokens = rearrange(
+                            coarse_tokens, "b (n q) -> b n q", q=coarse_quantizers
+                        )
                         pred_tokens = torch.cat((coarse_tokens, pred_tokens), dim=-1)
 
                     waves = self.neural_codec.decode_from_codebook_indices(pred_tokens)
@@ -540,28 +591,48 @@ class SingleStageTrainer(nn.Module):
                     max_files_to_save = 4
                     for i, wave in enumerate(waves):
                         if i < max_files_to_save:
-                            file_path = str(self.waves_folder / f'{self.stage}.reconstructed_wave_{i}.{steps}.wav')
-                            torchaudio.save(file_path, wave, self.neural_codec.sample_rate)
+                            file_path = str(
+                                self.waves_folder
+                                / f"{self.stage}.reconstructed_wave_{i}.{steps}.wav"
+                            )
+                            torchaudio.save(
+                                file_path, wave, self.neural_codec.sample_rate
+                            )
                             file_paths.append(file_path)
                         else:
                             break
 
-                    if 'wandb' in self.log_with and exists(wandb):
-                        audios = [wandb.Audio(file_path, caption=f'reconstructed wave at {steps} steps') for file_path in file_paths]
-                        wandb.log({'reconstructed_wave': audios})
+                    if "wandb" in self.log_with and exists(wandb):
+                        audios = [
+                            wandb.Audio(
+                                file_path,
+                                caption=f"reconstructed wave at {steps} steps",
+                            )
+                            for file_path in file_paths
+                        ]
+                        wandb.log({"reconstructed_wave": audios})
             # log
-            self.accelerator.log({
-                "train_loss": train_loss,
-                "grad_norms": grad_norms,
-                "valid_loss": valid_loss,
-                "valid_accuracy": valid_accuracy
-            }, step=steps)
+            self.accelerator.log(
+                {
+                    "train_loss": train_loss,
+                    "grad_norms": grad_norms,
+                    "valid_loss": valid_loss,
+                    "valid_accuracy": valid_accuracy,
+                },
+                step=steps,
+            )
 
             # save model every so often
             if self.is_main and not (steps % self.save_model_every):
-                model_path = str(self.results_folder / f'{self.stage}.transformer.{steps}.pt')
-                optim_path = str(self.results_folder / f'{self.stage}.optimizer.{steps}.pt')
-                scheduler_path = str(self.results_folder / f'{self.stage}.scheduler.{steps}.pt')
+                model_path = str(
+                    self.results_folder / f"{self.stage}.transformer.{steps}.pt"
+                )
+                optim_path = str(
+                    self.results_folder / f"{self.stage}.optimizer.{steps}.pt"
+                )
+                scheduler_path = str(
+                    self.results_folder / f"{self.stage}.scheduler.{steps}.pt"
+                )
                 self.save(model_path, optim_path, scheduler_path)
                 # save audio conditioner (clap) rvq checkpoint
                 if exists(self.audio_conditioner) and self.audio_conditioner.learn_rvq:
@@ -577,8 +648,14 @@ class SingleStageTrainer(nn.Module):
             if self.is_main:
                 self.steps += 1
             accelerate.utils.broadcast(self.steps)
-            # print(f"rank={self.rank} local_rank={self.local_rank} update steps={self.steps.item()}")
+            print(
+                f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} update steps={self.steps.item()}"
+            )
             self.accelerator.wait_for_everyone()
+        self.print(
+            f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} done epoch steps={self.steps.item()}"
+        )
+        self.accelerator.wait_for_everyone()
         return None
 
     def train(self, log_fn=noop):
@@ -622,6 +699,8 @@ class ClapRVQTrainer(nn.Module):
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
+        self.rank = self.accelerator.process_index
+        self.local_rank = self.accelerator.local_process_index
 
         self.log_with = accelerate_kwargs['log_with'] if 'log_with' in accelerate_kwargs else None
 
@@ -634,11 +713,18 @@ class ClapRVQTrainer(nn.Module):
         if not exists(self.ds):
             assert exists(
                 folder), 'folder must be passed in, if not passing in a custom dataset for text conditioned audio synthesis training'
-
+            shm_filelist_name = get_distributed_shm_filelist_name(
+                self.accelerator.num_processes,
+                self.rank,
+                self.local_rank,
+                filelist_path,
+                blacklist_path,
+            )
             self.ds = SoundDataset(
+                shm_filelist_name,
                 folder,
-                filelist_path=filelist_path,
-                blacklist_path=blacklist_path,
+                # filelist_path=filelist_path,
+                # blacklist_path=blacklist_path,
                 max_length_seconds=data_max_length_seconds,
                 target_sample_hz=audio_conditioner.sample_rate,
                 seq_len_multiple_of=None,
@@ -658,19 +744,21 @@ class ClapRVQTrainer(nn.Module):
             self.print(f'training with shared training and valid dataset of {len(self.ds)} samples')
 
         # dataloader
+        dataloader_kwargs = {
+            "shuffle": True,
+            "pin_memory": True,
+            "persistent_workers": True,
+            "num_workers": 16,
+            # "multiprocessing_context": "forkserver",
+        }
+        self.dl = get_dataloader(self.ds, batch_size=batch_size, **dataloader_kwargs)
 
-        self.dl = get_dataloader(self.ds, batch_size=batch_size, shuffle=True)
+        self.valid_dl = get_dataloader(
+            self.valid_ds, batch_size=batch_size, **dataloader_kwargs
+        )
 
-        self.valid_dl = get_dataloader(self.valid_ds, batch_size=batch_size, shuffle=True)
-
-        (
-            self.audio_conditioner,
-            self.dl,
-            self.valid_dl
-        ) = self.accelerator.prepare(
-            self.audio_conditioner,
-            self.dl,
-            self.valid_dl
+        (self.audio_conditioner, self.dl, self.valid_dl) = self.accelerator.prepare(
+            self.audio_conditioner, self.dl, self.valid_dl
         )
         print(f"dataloader len {len(self.dl)}")
 
@@ -700,12 +788,10 @@ class ClapRVQTrainer(nn.Module):
             configs_folder.mkdir(parents=True, exist_ok=True)
             for config_path in config_paths:
                 copy_file_to_folder(config_path, configs_folder)
-        self.accelerator.wait_for_everyone()
 
         # ThomasLee
-        self.rank = self.accelerator.process_index
-        self.local_rank = self.accelerator.local_process_index
         self.to(self.accelerator.device)
+        self.accelerator.wait_for_everyone()
 
     def print(self, msg):
         self.accelerator.print(msg)
@@ -742,60 +828,60 @@ class ClapRVQTrainer(nn.Module):
                 audio_input=raw_wave_for_clap, return_embedding=True
             )
             embed_list.append(embed)
-            if not (batch_idx % accumulate_batches):
-                # train rvq
-                embeds = torch.cat(embed_list, dim=0)
-                embeds = self.accelerator.gather(embeds)
+            if batch_idx % accumulate_batches:
                 print(
-                    f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} embeds={embeds.size()}"
+                    f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} {steps=} skip {batch_idx=}"
                 )
-                loss = self.audio_conditioner.quantize(embeds, return_rvq_loss=True)
+                continue
+            self.accelerator.wait_for_everyone()
+            # train rvq
+            embeds = torch.cat(embed_list, dim=0)
+            gathered_embeds = self.accelerator.gather(embeds)
+            print(
+                f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} embeds={embeds.size()} gathered_embeds={gathered_embeds.size()}"
+            )
+            loss = self.audio_conditioner.quantize(
+                gathered_embeds, return_rvq_loss=True
+            )
+            # gather loss
+            loss_t = torch.tensor(
+                loss, device=self.accelerator.device, requires_grad=False
+            )
+            gathered_loss_t = self.accelerator.gather(loss_t)
+            print(
+                f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {gathered_loss_t=}"
+            )
+            gathered_loss_mean_t = gathered_loss_t.mean()
+            print(
+                f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {gathered_loss_mean_t=}"
+            )
+            acc_train_loss = gathered_loss_mean_t.item()
+            self.print(
+                f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} training loss: {acc_train_loss}"
+            )
+            # validation
+            if not (steps % self.save_results_every):
+                valid_input = None
+                for batch_data in self.valid_dl:
+                    valid_input = batch_data[0]
+                    break
+                with torch.no_grad():
+                    self.audio_conditioner.learn_rvq = False
+                    loss = self.audio_conditioner.forward(
+                        audio_input=valid_input, return_rvq_loss=True
+                    )
+                # gather
+                valid_loss_t = torch.tensor(
+                    loss, device=self.accelerator.device, requires_grad=False
+                )
+                gathered_valid_loss_t = self.accelerator.gather(valid_loss_t)
                 print(
-                    f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {loss=}"
+                    f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {gathered_valid_loss_t=}"
                 )
-                # gather loss
-                loss_t = torch.tensor(loss).to(self.accelerator.device)
-                gathered_loss_t = self.accelerator.gather(loss_t)
-                print(
-                    f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {gathered_loss_t=}"
-                )
-                gathered_loss_mean_t = gathered_loss_t.mean()
-                print(
-                    f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {gathered_loss_mean_t=}"
-                )
-                acc_train_loss = gathered_loss_mean_t.item()
+                valid_loss = gathered_valid_loss_t.mean().item()
                 self.print(
-                    f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} training loss: {acc_train_loss}"
+                    f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} {steps=} validation loss: {valid_loss}"
                 )
-                # reset embeds and update
-                embed_list.clear()
-                if self.is_main:
-                    self.steps += 1
-                accelerate.utils.broadcast(self.steps)
-                print(
-                    f"rank={self.rank} local_rank={self.local_rank} update steps={self.steps.item()}"
-                )
-                # validation
-                if not (steps % self.save_results_every):
-                    valid_input = None
-                    for batch_data in self.valid_dl:
-                        valid_input = batch_data[0]
-                        break
-                    with torch.no_grad():
-                        self.audio_conditioner.learn_rvq = False
-                        loss = self.audio_conditioner.forward(
-                            audio_input=valid_input, return_rvq_loss=True
-                        )
-                    # gather
-                    valid_loss_t = torch.tensor(loss).to(self.accelerator.device)
-                    gathered_valid_loss_t = self.accelerator.gather(valid_loss_t)
-                    print(
-                        f"rank={self.rank} local_rank={self.local_rank} {steps=} {batch_idx=} {gathered_valid_loss_t=}"
-                    )
-                    valid_loss = gathered_valid_loss_t.mean().item()
-                    self.print(
-                        f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} {steps=} validation loss: {valid_loss}"
-                    )
             # log
             self.accelerator.log({
                 "train_loss": loss,
@@ -803,7 +889,6 @@ class ClapRVQTrainer(nn.Module):
             }, step=steps)
 
             # save model every so often
-
             if self.is_main and not (steps % self.save_model_every):
                 # save audio conditioner (clap) rvq checkpoint
                 rvq_state_dict = self.accelerator.unwrap_model(
@@ -814,8 +899,21 @@ class ClapRVQTrainer(nn.Module):
                 self.print(
                     f"{datetime.datetime.now()}: {steps=} saving model to {save_path}"
                 )
+
+            # reset embeds and update
+            embed_list.clear()
+            if self.is_main:
+                self.steps += 1
+            accelerate.utils.broadcast(self.steps)
+            print(
+                f"rank={self.rank} local_rank={self.local_rank} update steps={self.steps.item()}"
+            )
             self.accelerator.wait_for_everyone()
-        
+        self.print(
+            f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} done epoch steps={self.steps.item()}"
+        )
+        self.accelerator.wait_for_everyone()
+        return None
 
     def train(self, log_fn=noop):
 
@@ -861,11 +959,18 @@ class HfHubertKmeansTrainer(nn.Module):
         if not exists(self.ds):
             assert exists(
                 folder), 'folder must be passed in, if not passing in a custom dataset for text conditioned audio synthesis training'
-
+            shm_filelist_name = get_distributed_shm_filelist_name(
+                self.accelerator.num_processes,
+                self.rank,
+                self.local_rank,
+                filelist_path,
+                blacklist_path,
+            )
             self.ds = SoundDataset(
+                shm_filelist_name,
                 folder,
-                filelist_path=filelist_path,
-                blacklist_path=blacklist_path,
+                # filelist_path=filelist_path,
+                # blacklist_path=blacklist_path,
                 max_length_seconds=data_max_length_seconds,
                 normalize=True,
                 target_sample_hz=hubert_kmeans.target_sample_hz,
@@ -987,6 +1092,9 @@ class HfHubertBatchKmeansTrainer(nn.Module):
     ):
         super().__init__()
         self.accelerator = Accelerator(**accelerate_kwargs)
+        self.rank = self.accelerator.process_index
+        self.local_rank = self.accelerator.local_process_index
+
         self.log_with = (
             accelerate_kwargs["log_with"] if "log_with" in accelerate_kwargs else None
         )
@@ -1001,11 +1109,18 @@ class HfHubertBatchKmeansTrainer(nn.Module):
             assert exists(
                 folder
             ), "folder must be passed in, if not passing in a custom dataset for text conditioned audio synthesis training"
-
+            shm_filelist_name = get_distributed_shm_filelist_name(
+                self.accelerator.num_processes,
+                self.rank,
+                self.local_rank,
+                filelist_path,
+                blacklist_path,
+            )
             self.ds = SoundDataset(
+                shm_filelist_name,
                 folder,
-                filelist_path=filelist_path,
-                blacklist_path=blacklist_path,
+                # filelist_path=filelist_path,
+                # blacklist_path=blacklist_path,
                 max_length_seconds=data_max_length_seconds,
                 normalize=True,
                 target_sample_hz=hubert_kmeans.target_sample_hz,
@@ -1031,11 +1146,18 @@ class HfHubertBatchKmeansTrainer(nn.Module):
             )
 
         # dataloader
+        dataloader_kwargs = {
+            "shuffle": True,
+            "pin_memory": True,
+            "persistent_workers": True,
+            "num_workers": 16,
+            # "multiprocessing_context": "forkserver",
+        }
         self.dl = get_dataloader(
-            self.ds, batch_size=feature_extraction_batch_size, shuffle=True
+            self.ds, batch_size=feature_extraction_batch_size, **dataloader_kwargs
         )
         self.valid_dl = get_dataloader(
-            self.valid_ds, batch_size=feature_extraction_batch_size, shuffle=True
+            self.valid_ds, batch_size=feature_extraction_batch_size, **dataloader_kwargs
         )
         # only wrap kmeans_model for custom functions
         self.kmeans_model, self.dl, self.valid_dl = self.accelerator.prepare(
@@ -1064,12 +1186,10 @@ class HfHubertBatchKmeansTrainer(nn.Module):
             configs_folder.mkdir(parents=True, exist_ok=True)
             for config_path in config_paths:
                 copy_file_to_folder(config_path, configs_folder)
-        self.accelerator.wait_for_everyone()
 
         # ThomasLee
-        self.rank = self.accelerator.process_index
-        self.local_rank = self.accelerator.local_process_index
         self.to(self.accelerator.device)
+        self.accelerator.wait_for_everyone()
 
     def print(self, msg):
         self.accelerator.print(msg)
@@ -1166,5 +1286,7 @@ class HfHubertBatchKmeansTrainer(nn.Module):
             )
             self.accelerator.wait_for_everyone()
         self.print(
-            f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} done epoch"
+            f"{datetime.datetime.now()}: rank={self.rank} local_rank={self.local_rank} done epoch steps={self.steps.item()}"
         )
+        self.accelerator.wait_for_everyone()
+        return None
