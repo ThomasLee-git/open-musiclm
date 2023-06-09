@@ -41,11 +41,12 @@ def train_ddp(args, model_config:MusicLMModelConfig, training_config:MusicLMTrai
 
     # init conditioners
     tmp_device = 'cpu'
-    use_preprocessed_data = training_config.semantic_trainer_cfg.use_preprocessed_data
+    trainer_cfg = training_config.semantic_trainer_cfg
+    use_preprocessed_data = trainer_cfg.use_preprocessed_data
     if use_preprocessed_data:
         clap = None
         wav2vec = None
-        print(f'training from preprocessed data {training_config.semantic_trainer_cfg.folder}')
+        print(f'training from preprocessed data {trainer_cfg.folder}')
     else:
         print('loading clap...')
         clap = create_clap_quantized_from_config(model_config, args.rvq_path, tmp_device).to(device)
@@ -79,7 +80,6 @@ def train_ddp(args, model_config:MusicLMModelConfig, training_config:MusicLMTrai
     transformer = DistributedDataParallel(transformer)
 
     # dataset config
-    trainer_cfg = training_config.semantic_trainer_cfg
     stage = "semantic"
     ds_fields = ('raw_wave_for_clap', 'raw_wave_for_semantic')
     ds_target_sample_hz = np.array((clap.sample_rate, wav2vec.target_sample_hz))
@@ -289,5 +289,7 @@ if __name__ == "__main__":
 
     model_config = load_model_config(args.model_config)
     training_config = load_training_config(args.training_config)
+
+    train_ddp(args, model_config, training_config)
 
     
