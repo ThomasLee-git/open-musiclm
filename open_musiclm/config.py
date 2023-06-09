@@ -219,7 +219,7 @@ def load_model(model, path):
     """helper class to load a model checkpoint"""
     path = Path(path)
     assert path.exists(), f'checkpoint does not exist at {str(path)}'
-    pkg = torch.load(str(path))
+    pkg = torch.load(str(path), map_location="cpu")
     model.load_state_dict(pkg)
 
 class disable_print:
