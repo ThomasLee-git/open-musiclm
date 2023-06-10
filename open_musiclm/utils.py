@@ -159,8 +159,12 @@ def prepare_audio(data, sample_hz, target_sample_hz, normalize=True, target_leng
         data = torch.mean(data, dim=0).unsqueeze(0)
     if normalize:
         data = zero_mean_unit_var_norm(data)
-    if exists(target_length_seconds) and data.shape[1] > target_length_seconds * sample_hz:
-        data = data[: , :int(target_length_seconds * sample_hz)]
+    if exists(target_length_seconds):
+        # FIXME: for convenience of batch processing
+        assert (
+            data.shape[1] > target_length_seconds * sample_hz
+        ), f"input data must be longer than {target_length_seconds * sample_hz}"
+        data = data[:, : int(target_length_seconds * sample_hz)]
     audio_for_wav2vec = resample(data, sample_hz, target_sample_hz)
     audio_for_wav2vec = int16_to_float32(float32_to_int16(audio_for_wav2vec))
     return audio_for_wav2vec
