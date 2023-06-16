@@ -21,7 +21,7 @@
         "valid_frac": 0.05,
         "lr": 0.0003,
         "lr_warmup": 3000,
-        "batch_size": 32,
+        "batch_size": 64,
         "grad_accum_every": 8,
         "wd": 0.01,
         "max_grad_norm": 0.5,

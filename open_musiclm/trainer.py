@@ -166,6 +166,15 @@ class SingleStageTrainer(nn.Module):
         # ThomasLee
         self.rank = self.accelerator.process_index
         self.local_rank = self.accelerator.local_process_index
+        # move
+        if exists(transformer):
+            transformer.to(self.accelerator.device)
+        if exists(wav2vec):
+            wav2vec.to(self.accelerator.device)
+        if exists(audio_conditioner):
+            audio_conditioner.to(self.accelerator.device)
+        if exists(neural_codec):
+            neural_codec.to(self.accelerator.device)
 
         self.log_with = accelerate_kwargs['log_with'] if 'log_with' in accelerate_kwargs else None
 

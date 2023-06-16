@@ -324,7 +324,9 @@ def get_hubert_batch_kmeans(
     emb_dim: int = 768,
     **kwargs,
 ):
-    wav2vec = HubertModel.from_pretrained(model_name, resume_download=True)
+    wav2vec = HubertModel.from_pretrained(
+        model_name, resume_download=True, local_files_only=True
+    )
     kmeans = BatchKmeans(k=codebook_size, dim=emb_dim)
     if kmeans_path:
         print(f"loading kmeans {kmeans_path}")

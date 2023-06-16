@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 from beartype.typing import Literal, Optional, List
 
+from .mulan import MuLanQuantized, create_mulan_quantized
 from .clap_quantized import ClapQuantized, create_clap_quantized
 from .encodec_wrapper import EncodecWrapper, create_encodec_24khz
 from .hf_hubert_kmeans import HfHubertWithKmeans, get_hubert_kmeans
@@ -332,6 +333,20 @@ def create_fine_transformer_from_config(
     return transformer
 
 # trainers
+
+@beartype_jit
+def create_mulan_quantized_from_config(
+    mulan_path: Optional[str], rvq_path: Optional[str], device, **kwargs
+) -> MuLanQuantized:
+    with disable_print():
+        return create_mulan_quantized(
+            device=device,
+            learn_rvq=False,
+            rvq_checkpoint_path=rvq_path,
+            checkpoint_path=mulan_path,
+            **kwargs,
+        ).to(device)
+
 
 @beartype_jit
 def create_clap_rvq_trainer_from_config(

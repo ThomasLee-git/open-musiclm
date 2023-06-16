@@ -1,0 +1,90 @@
+import argparse
+import os
+import sys
+from pathlib import Path
+
+import torch
+
+sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
+
+from open_musiclm.config import (
+    create_mulan_quantized_from_config,
+    create_hubert_kmeans_from_config,
+    create_semantic_transformer_from_config,
+    create_single_stage_trainer_from_config,
+    load_model_config,
+    load_training_config,
+)
+from scripts.train_utils import validate_train_args, load_checkpoint_from_args
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="train semantic stage")
+    parser.add_argument("--results_folder", default=None, type=str)
+    parser.add_argument("--project_dir", default=None, type=str)
+    parser.add_argument(
+        "--use_batch_kmeans", default=True, action=argparse.BooleanOptionalAction
+    )
+    parser.add_argument("--continue_from_dir", default=None, type=str)
+    parser.add_argument("--continue_from_step", default=None, type=int)
+    parser.add_argument("--model_config", default=None, type=str)
+    parser.add_argument("--training_config", default=None, type=str)
+    parser.add_argument("--mulan_path", default=None, type=str)
+    parser.add_argument("--rvq_path", default=None, type=str)
+    parser.add_argument("--kmeans_path", default=None, type=str)
+    parser.add_argument("--fine_tune_from", default=None, type=str)
+
+    args = parser.parse_args()
+
+    validate_train_args(args)
+
+    model_config = load_model_config(args.model_config)
+    training_config = load_training_config(args.training_config)
+
+    device = "cpu"
+
+    use_preprocessed_data = training_config.semantic_trainer_cfg.use_preprocessed_data
+
+    if use_preprocessed_data:
+        raise ValueError("preprocessed data is not supported yet")
+    else:
+        print("loading mulan...")
+        mulan = create_mulan_quantized_from_config(args.mulan_path, args.rvq_path, device)
+
+        if args.use_batch_kmeans:
+            print("loading wav2vec with batch_kmeans...")
+        else:
+            print("loading wav2vec with original kmeans...")
+        wav2vec = create_hubert_kmeans_from_config(
+            model_config,
+            args.kmeans_path,
+            device,
+            use_batch_kmeans=args.use_batch_kmeans,
+        )
+
+    print("loading semantic stage...")
+    semantic_transformer = create_semantic_transformer_from_config(
+        model_config, args.fine_tune_from, device
+    )
+
+    trainer = create_single_stage_trainer_from_config(
+        model_config=model_config,
+        training_config=training_config,
+        stage="semantic",
+        results_folder=args.results_folder,
+        transformer=semantic_transformer,
+        clap=mulan,
+        wav2vec=wav2vec,
+        encodec_wrapper=None,
+        device=None,
+        accelerate_kwargs={
+            "log_with": "tensorboard",
+            "project_dir": args.project_dir,
+            "split_batches": True,
+            "gradient_accumulation_steps": training_config.semantic_trainer_cfg.grad_accum_every,
+        },
+        config_paths=[args.model_config, args.training_config],
+    )
+
+    load_checkpoint_from_args(trainer, args)
+
+    trainer.train()
