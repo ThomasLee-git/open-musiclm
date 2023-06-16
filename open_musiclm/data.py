@@ -104,10 +104,10 @@ class SoundDataset(Dataset):
         self.ignore_load_errors = ignore_load_errors
         self.random_crop = random_crop
 
-        self.target_sample_hz = np.array(cast_tuple(target_sample_hz))
+        self.target_sample_hz = np.array(target_sample_hz)
         num_outputs = len(self.target_sample_hz)
 
-        self.max_length_seconds = np.array(cast_tuple(max_length_seconds, num_outputs))
+        self.max_length_seconds = np.array(max_length_seconds)
         self.max_lengths = np.array(
             [
                 int(s * hz) if exists(s) else None

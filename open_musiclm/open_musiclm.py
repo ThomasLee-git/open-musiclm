@@ -165,7 +165,7 @@ class TokenConditionedTransformer(nn.Module):
             dummy_tokens = torch.zeros((*tokens.size()[:2], 1), requires_grad=False).to(
                 tokens.device
             )
-            if self_attn_mask:
+            if exists(self_attn_mask):
                 self_attn_mask = ~self_attn_mask
             # use inverted mask for decoder
             tokens = self.transformer(
