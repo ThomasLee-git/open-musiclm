@@ -362,7 +362,9 @@ def create_clap_rvq_trainer_from_config(
     trainer = ClapRVQTrainer(
         audio_conditioner=clap,
         results_folder=results_folder,
-        data_max_length_seconds=model_config.global_cfg.semantic_audio_length_seconds,
+        data_max_length_seconds=(
+            model_config.global_cfg.semantic_audio_length_seconds,
+        ),
         accelerate_kwargs=accelerate_kwargs,
         config_paths=config_paths,
         **asdict(training_config.clap_rvq_trainer_cfg),
@@ -404,7 +406,9 @@ def create_hubert_batch_kmeans_trainer_from_config(
     trainer = HfHubertBatchKmeansTrainer(
         hubert_kmeans=hubert_kmeans,
         results_folder=results_folder,
-        data_max_length_seconds=model_config.global_cfg.semantic_audio_length_seconds,
+        data_max_length_seconds=(
+            model_config.global_cfg.semantic_audio_length_seconds,
+        ),
         config_paths=config_paths,
         **asdict(training_config.hubert_kmeans_trainer_cfg),
         **kwargs,

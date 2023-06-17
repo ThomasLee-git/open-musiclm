@@ -2,7 +2,7 @@
     "clap_rvq_trainer_cfg": {
         "folder": "./data",
         "filelist_path": "./data/4m_list.txt",
-        "num_train_steps": 100000,
+        "num_train_steps": 800001,
         "batch_size": 64,
         "accumulate_batches": 32,
         "save_model_every": 30,

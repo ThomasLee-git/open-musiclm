@@ -722,20 +722,27 @@ class ClapRVQTrainer(nn.Module):
         if not exists(self.ds):
             assert exists(
                 folder), 'folder must be passed in, if not passing in a custom dataset for text conditioned audio synthesis training'
-            shm_filelist_name = get_distributed_shm_filelist_name(
+            np_list, np_addr_list = get_distributed_shared_filelist(
                 self.accelerator.num_processes,
                 self.rank,
                 self.local_rank,
                 filelist_path,
                 blacklist_path,
             )
+            assert (
+                np_list is not None
+            ), f"rank={self.rank} local_rank={self.local_rank} np_list is None"
+            assert (
+                np_addr_list is not None
+            ), f"rank={self.rank} local_rank={self.local_rank} np_addr_list is None"
             self.ds = SoundDataset(
-                shm_filelist_name,
+                np_list,
+                np_addr_list,
                 folder,
                 # filelist_path=filelist_path,
                 # blacklist_path=blacklist_path,
                 max_length_seconds=data_max_length_seconds,
-                target_sample_hz=audio_conditioner.sample_rate,
+                target_sample_hz=(audio_conditioner.sample_rate,),
                 seq_len_multiple_of=None,
                 ignore_files=default(ignore_files, []),
                 ignore_load_errors=ignore_load_errors
@@ -968,15 +975,22 @@ class HfHubertKmeansTrainer(nn.Module):
         if not exists(self.ds):
             assert exists(
                 folder), 'folder must be passed in, if not passing in a custom dataset for text conditioned audio synthesis training'
-            shm_filelist_name = get_distributed_shm_filelist_name(
+            np_list, np_addr_list = get_distributed_shared_filelist(
                 self.accelerator.num_processes,
                 self.rank,
                 self.local_rank,
                 filelist_path,
                 blacklist_path,
             )
+            assert (
+                np_list is not None
+            ), f"rank={self.rank} local_rank={self.local_rank} np_list is None"
+            assert (
+                np_addr_list is not None
+            ), f"rank={self.rank} local_rank={self.local_rank} np_addr_list is None"
             self.ds = SoundDataset(
-                shm_filelist_name,
+                np_list,
+                np_addr_list,
                 folder,
                 # filelist_path=filelist_path,
                 # blacklist_path=blacklist_path,
@@ -1118,21 +1132,28 @@ class HfHubertBatchKmeansTrainer(nn.Module):
             assert exists(
                 folder
             ), "folder must be passed in, if not passing in a custom dataset for text conditioned audio synthesis training"
-            shm_filelist_name = get_distributed_shm_filelist_name(
+            np_list, np_addr_list = get_distributed_shared_filelist(
                 self.accelerator.num_processes,
                 self.rank,
                 self.local_rank,
                 filelist_path,
                 blacklist_path,
             )
+            assert (
+                np_list is not None
+            ), f"rank={self.rank} local_rank={self.local_rank} np_list is None"
+            assert (
+                np_addr_list is not None
+            ), f"rank={self.rank} local_rank={self.local_rank} np_addr_list is None"
             self.ds = SoundDataset(
-                shm_filelist_name,
+                np_list,
+                np_addr_list,
                 folder,
                 # filelist_path=filelist_path,
                 # blacklist_path=blacklist_path,
                 max_length_seconds=data_max_length_seconds,
                 normalize=True,
-                target_sample_hz=hubert_kmeans.target_sample_hz,
+                target_sample_hz=(hubert_kmeans.target_sample_hz,),
                 seq_len_multiple_of=hubert_kmeans.seq_len_multiple_of,
                 ignore_files=default(ignore_files, []),
                 ignore_load_errors=ignore_load_errors,

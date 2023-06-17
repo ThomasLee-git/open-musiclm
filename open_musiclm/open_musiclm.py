@@ -139,6 +139,7 @@ class TokenConditionedTransformer(nn.Module):
 
             # add offsets
             if sequence.num_quantizers > 1:
+                # TODO: fix offset for sos or eos
                 offsets = sequence.codebook_size * torch.arange(sequence.num_quantizers, device=device)
                 offsets = repeat(offsets, 'q -> 1 (n q)', n=ceil_div(token_ids.shape[-1], sequence.num_quantizers))
                 offsets = offsets[:, :token_ids.shape[-1]]
