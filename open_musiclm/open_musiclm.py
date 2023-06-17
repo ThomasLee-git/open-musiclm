@@ -1125,6 +1125,7 @@ class MusicLM(nn.Module):
         coarse_sliding_window_step_percent=0.5,
         fine_sliding_window_step_percent=1,
     ):
+        """refactored generation"""
         assert exists(
             text
         ), "text needs to be passed in if one of the transformer requires conditioning"
@@ -1293,11 +1294,7 @@ class MusicLM(nn.Module):
         audio_sample_rate: int,
         **kwargs,
     ):
-        """
-        Generates samples, then uses CLAP to identify the best matches to the text.
-
-        Returns a list of generated waves and a list of their topk cosine similarity scores.
-        """
+        """generation using text-audio pairs"""
         samples = self.forward2(
             text=text_list,
             prime_wave=audios,
@@ -1313,3 +1310,67 @@ class MusicLM(nn.Module):
         audio_latents = self.clap(audio_input=clap_input, return_embedding=True)
         sim = F.cosine_similarity(text_latents, audio_latents, dim=-1)
         return samples, sim
+
+    @eval_decorator
+    @torch.no_grad()
+    def forward3(
+        self,
+        num_samples,
+        output_seconds=8,
+        semantic_window_seconds=10,
+        coarse_window_seconds=4,
+        fine_window_seconds=2,
+        semantic_steps_per_second=50,  # Note: for MERTv0 its actually 50 * seconds - 1
+        acoustic_steps_per_second=75,  # 75 for encodec, 50 for soundstream
+        return_coarse_generated_wave=False,
+        mask_out_generated_fine_tokens=False,
+        semantic_sliding_window_step_percent=0.5,
+        coarse_sliding_window_step_percent=0.5,
+        fine_sliding_window_step_percent=1,
+    ):
+        """unconditional generation"""
+        steps = 0
+        num_coarse_tokens = int(output_seconds * acoustic_steps_per_second)
+        condition_coarse_length = int(
+            acoustic_steps_per_second
+            * coarse_window_seconds
+            * (1 - coarse_sliding_window_step_percent)
+        )
+        coarse_token_ids = None
+        # create dummy conditioners
+        clap_token_ids = torch.zeros((num_samples, 0)).long()
+        semantic_token_ids = torch.zeros((num_samples, 0)).long()
+        # generate the first part
+        coarse_token_ids = None
+        while coarse_token_ids is None or coarse_token_ids.size(-2) < num_coarse_tokens:
+            print(f"generating unconditional coarse stage {steps=}")
+            if exists(coarse_token_ids):
+                tmp_coarse_condition = coarse_token_ids[:, -condition_coarse_length:]
+            else:
+                tmp_coarse_condition = None
+            pred_coarse_token_ids = self.coarse.generate(
+                clap_token_ids=clap_token_ids,
+                semantic_token_ids=semantic_token_ids,
+                coarse_token_ids=tmp_coarse_condition,
+                max_time_steps=int(coarse_window_seconds * acoustic_steps_per_second),
+                reconstruct_wave=False,
+                include_eos_in_output=False,
+                append_eos_to_conditioning_tokens=True,
+                temperature=0.95,
+            )
+            if exists(tmp_coarse_condition):
+                pred_coarse_token_ids = pred_coarse_token_ids[
+                    :, condition_coarse_length:
+                ]
+                coarse_token_ids = torch.cat(
+                    (coarse_token_ids, pred_coarse_token_ids), dim=1
+                )
+            else:
+                coarse_token_ids = pred_coarse_token_ids
+            steps += 1
+        if return_coarse_generated_wave:
+            print("decoding audio ...")
+            wave = self.neural_codec.decode_from_codebook_indices(coarse_token_ids)
+            return wave
+        # TODO: add fine stage
+        return wave
