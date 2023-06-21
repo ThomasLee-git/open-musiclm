@@ -426,6 +426,8 @@ class TorchScaleDecoderWrapper(nn.Module):
         cond_as_self_attn_prefix=False,
         non_causal_prefix_size=0,
         relative_position_bias_type="continuous",
+        max_rel_pos: int = -1,
+        rel_pos_buckets: int = 512,
         **kwargs,
     ) -> None:
         from torchscale.architecture.config import DecoderConfig
@@ -433,6 +435,9 @@ class TorchScaleDecoderWrapper(nn.Module):
 
         super().__init__()
         print(f"using subln")
+        assert max_rel_pos > 0, f"invalid max_rel_pos"
+        rel_pos_buckets = max(rel_pos_buckets, max_rel_pos // 4)
+        print(f"torchscale {max_rel_pos=} {rel_pos_buckets=}")
 
         config_dict = {
             "decoder_embed_dim": dim,
@@ -447,9 +452,9 @@ class TorchScaleDecoderWrapper(nn.Module):
             "activation_dropout": 0.0,
             "no_scale_embedding": True,
             "layernorm_embedding": False,
-            # TODO: make the following parameters
-            "rel_pos_buckets": 128,
-            "max_rel_pos": 512,
+            # ThomasLee
+            "max_rel_pos": max_rel_pos,
+            "rel_pos_buckets": rel_pos_buckets,
             "no_output_layer": True,
         }
         self.config = DecoderConfig(**config_dict)

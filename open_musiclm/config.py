@@ -295,6 +295,22 @@ def create_coarse_transformer_from_config(
     device,
     **kwargs,
 ) -> TokenConditionedTransformer:
+    # ThomasLee: get max sequence length
+    coarse_audio_length_seconds = model_config.global_cfg.coarse_audio_length_seconds
+    max_rel_pos = (
+        model_config.clap_rvq_cfg.rq_num_quantizers
+        + 2
+        + int(model_config.hubert_kmeans_cfg.output_hz * coarse_audio_length_seconds)
+        + 2
+        + int(
+            model_config.encodec_cfg.output_hz
+            * coarse_audio_length_seconds
+            * model_config.global_cfg.num_coarse_quantizers
+        )
+    )
+    print(f"coarse stage {max_rel_pos=}")
+    kwargs.update(max_rel_pos=max_rel_pos)
+
     transformer = create_coarse_transformer(
         **asdict(model_config.coarse_cfg),
         clap_codebook_size=model_config.clap_rvq_cfg.codebook_size,
