@@ -157,6 +157,8 @@ class SingleStageTrainer(nn.Module):
         results_folder='./results',
         accelerate_kwargs: dict = {},
         config_paths: Optional[List[str]] = None,
+        # ThomasLee
+        unconditional:bool=False,
     ):
         super().__init__()
         kwargs_handler = DistributedDataParallelKwargs(find_unused_parameters=True)
@@ -189,6 +191,8 @@ class SingleStageTrainer(nn.Module):
         self.neural_codec = neural_codec
 
         self.stage = stage
+        if unconditional:
+            assert stage=="coarse", "only coarse stage supports unconditional generation"
 
         if stage == 'semantic':
             assert self.use_preprocessed_data or (exists(audio_conditioner) and exists(wav2vec))
