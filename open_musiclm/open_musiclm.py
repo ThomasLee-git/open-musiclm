@@ -74,7 +74,7 @@ class TokenConditionedTransformer(nn.Module):
             self.start_tokens.append(nn.Parameter(torch.randn(dim)))
             self.eos_ids.append(sequence.codebook_size)
 
-            codebook_size_with_eos = sequence.codebook_size + 1
+            codebook_size_with_eos = sequence.codebook_size
 
             self.embeddings.append(nn.Embedding(codebook_size_with_eos * sequence.num_quantizers, dim))
             self.logit_weights.append(nn.Parameter(torch.randn(sequence.num_quantizers, codebook_size_with_eos, dim)))
@@ -140,9 +140,10 @@ class TokenConditionedTransformer(nn.Module):
             # add offsets
             if sequence.num_quantizers > 1:
                 # TODO: fix offset for sos or eos
-                offsets = sequence.codebook_size * torch.arange(sequence.num_quantizers, device=device)
-                offsets = repeat(offsets, 'q -> 1 (n q)', n=ceil_div(token_ids.shape[-1], sequence.num_quantizers))
-                offsets = offsets[:, :token_ids.shape[-1]]
+                # add offsets
+                seq_len = token_ids.size(-1)
+                offsets = torch.arange(seq_len, device=token_ids.device, dtype=torch.long) % sequence.num_quantizers
+                offsets *= sequence.codebook_size
                 token_ids = token_ids + offsets
 
             # get embeddings and prepare for next step
@@ -368,12 +369,12 @@ class TokenConditionedTransformerWrapper(nn.Module):
 
         all_token_ids = list(map(lambda t: rearrange(t, 'b ... -> b (...)'), all_token_ids))
 
-        if self.training:
-            assert not input_has_eos, "train sequences (from clap, wav2vec, etc.) shouldn't come with an eos token"
+        # if self.training:
+        #     assert not input_has_eos, "train sequences (from clap, wav2vec, etc.) shouldn't come with an eos token"
 
-        # append eos to sequences if not already there
-        if not input_has_eos:
-            all_token_ids = [append_eos_id(ids, eos_id) for ids, eos_id in zip(all_token_ids, self.eos_ids)]
+        # # append eos to sequences if not already there
+        # if not input_has_eos:
+        #     all_token_ids = [append_eos_id(ids, eos_id) for ids, eos_id in zip(all_token_ids, self.eos_ids)]
 
         if self.unique_consecutive:
             for index, sequence_info in enumerate(self.token_sequences):
